@@ -1,0 +1,28 @@
+# 运行产物
+cache/
+*.log
+*.pid
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 本地配置（含 QQ 号 / B站 UID / 令牌，绝不入库）
+config.local.json
+*.local.json
+secrets*
+*.key
+*.pem
+.env
+
+# 语音样本（可能含真实人声）
+voice-samples/
+
+# 真实人格卡不入库（只保留示例与说明）
+persona/*.md
+!persona/README.md
+!persona/example-persona.md
+
+# 角色数据 / 记忆（私有仓库：xiaojingyu-memory）
+characters/
+memory/

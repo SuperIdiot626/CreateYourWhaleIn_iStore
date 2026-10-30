@@ -1,0 +1,22 @@
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -2227,7 +2227,18 @@
+ 
+     const assertSendAllowed = guard ? captureSendGuard(key) : null;
+     const [kind, id] = key.split(':');
+-    const recordSegment = { type: 'record', data: { file: sendPath } };
++    // 2026-10-30：SnowLuma / NapCat 跑在**另一个容器**里，看不到本容器的绝对路径，
++    // 传路径会得到「文件处理失败: 识别URL失败」。record 段的 file 支持 base64://，
++    // 改成把字节塞进请求体，跨容器就不需要共享卷。>8MB 仍走路径（base64 会撑大请求）。
++    const recordSegment = (() => {
++      try {
++        const st = fs.statSync(sendPath);
++        if (st.isFile() && st.size > 0 && st.size <= 8 * 1024 * 1024) {
++          return { type: 'record', data: { file: 'base64://' + fs.readFileSync(sendPath).toString('base64') } };
++        }
++      } catch {}
++      return { type: 'record', data: { file: sendPath } };
++    })();
+     let resolveSend;
+     let rejectSend;
+     const sendPromise = new Promise((resolve, reject) => { resolveSend = resolve; rejectSend = reject; });

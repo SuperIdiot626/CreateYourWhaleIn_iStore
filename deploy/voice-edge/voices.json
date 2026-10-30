@@ -1,0 +1,10 @@
+{
+  "_说明": "character 是桥接配置里 tts.character 填的角色名；voice 是 edge-tts 的音色 id。",
+  "default": "zh-CN-XiaoyiNeural",
+  "characters": {
+    "xiaoyu": "zh-CN-XiaoyiNeural",
+    "xiaoyi": "zh-CN-XiaoyiNeural",
+    "xiaoxiao": "zh-CN-XiaoxiaoNeural",
+    "xiaoxuan": "zh-CN-XiaoxuanNeural"
+  }
+}
