@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **部署机主机名被 Tailscale MagicDNS 抢走**：同一台机器在局域网和 tailnet 里的名字只差大小写，
+  Tailscale 把短别名写进 Windows hosts，导致按短名访问 SMB 报 `0x80070035`（流量去了 tailnet
+  地址，而 Samba 只绑 LAN）。修法：LAN 名与 tailnet 全名都在 hosts 里固化，并关掉该机的
+  MagicDNS。根因链与验证见 [cases/2026-10-31-istoreos-smb-access.md](cases/2026-10-31-istoreos-smb-access.md)。
+
 ## [0.2.0] - 2026-10-31
 
 让她的语气真的能听出来，以及「换引擎」从口号变成一行配置。
