@@ -1,0 +1,243 @@
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -1319,13 +1319,49 @@
+       return new RegExp(`[:.]${port}\\s+\\S+\\s+LISTENING`, 'i').test(out);
+     }
+     const out = execFileSync('sh', ['-c', 'ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
+-    return new RegExp(`[:.]${port}\\s`).test(out);
++    if (new RegExp(`[:.]${port}\\s`).test(out)) return true;
++    // 2026-11-01：容器里常常没有 ss/netstat（实测 dsh 容器两个都没有），上面的命令
++    // 会静默返回空字符串 → 判定成"端口空闲"，双实例防线就形同虚设。这里补一条纯 /proc 探测。
++    return portListeningInProc(port);
+   } catch {
+     // 探测不出来时保守认为「有人在跑」，宁可让用户手动删锁，也不要冒双实例的风险。
+     return true;
+   }
+ }
+ 
++/** 纯 /proc/net/tcp{,6} 探测某端口是否在本机 LISTEN（不依赖 ss/netstat）。 */
++function portListeningInProc(port) {
++  const hexPort = port.toString(16).toUpperCase().padStart(4, '0');
++  for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) {
++    try {
++      const lines = fs.readFileSync(file, 'utf8').split('\n').slice(1);
++      for (const line of lines) {
++        const parts = line.trim().split(/\s+/);
++        // 状态 0A = LISTEN；parts[1] 是 "本地地址:端口"
++        if (parts.length > 3 && parts[3] === '0A' && String(parts[1]).endsWith(`:${hexPort}`)) return true;
++      }
++    } catch {}
++  }
++  return false;
++}
++
++/**
++ * 这个 PID 真的是桥接吗？（Linux 读 /proc/<pid>/cmdline）
++ *
++ * 2026-11-01：`acquireLock()` 原来用「PID 活着 + 控制台端口空闲 ⇒ 锁过期」来判断，
++ * 而新实例从写锁到真正 listen 之间有十几秒启动工作量 —— 这个窗口里第二个进程会把
++ * 锁判成过期并抢走它。改成看命令行：是 bridge.js 就认为在跑，不看端口。
++ */
++function pidLooksLikeBridge(pid) {
++  if (process.platform === 'win32') return true; // Windows 读不到 /proc，沿用保守行为
++  try {
++    const cmd = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
++    return cmd.includes('bridge.js');
++  } catch {
++    return true; // 读不到就保守认为在跑（宁可让人删锁，也别双实例）
++  }
++}
++
+ function acquireLock() {
+   fs.mkdirSync(STATE_DIR, { recursive: true });
+   // 原子创建锁文件：把 PID 一次性写入（flag 'wx'），避免“先建空文件再写 PID”的窗口被第二个进程当作过期锁偷走。
+@@ -1353,8 +1389,9 @@
+         try {
+           process.kill(pid, 0);
+           // 没抛异常只说明「存在某个持有该 PID 的进程」，不能证明那就是桥接
+-          // （PID 被回收给别的程序时会误判），所以再加一道端口探测。
+-          if (!consolePortInUse()) stale = true;
++          // （PID 被回收给别的程序时会误判）。2026-11-01 起改看命令行而不是端口：
++          // 端口在"新实例刚拿到锁、还没 listen"的窗口期是空的，用它判过期会把锁抢走。
++          if (!pidLooksLikeBridge(pid)) stale = true;
+         } catch (error) {
+           if (error.code === 'ESRCH') {
+             stale = true;
+@@ -3619,6 +3656,10 @@
+             scheduleProactiveCheckV2(key);
+           }
+           log('桥接模式已确定为 reserved2，恢复有限睡眠定时器');
++          // 2026-11-01：WS 的 open 通常早于"模式确定为 reserved2"，那时补历史会被
++          // `skipped:'mode'` 吞掉；而账号上线边沿又已经被第一次心跳用掉 → 漏的消息再也补不回来。
++          // 这里补一次：在 "DSH 就绪 + 模式确定" 这个确定性时刻，且走 HTTP、不依赖 WS。
++          void runHistoryCatchUp('dsh-ready').catch((error) => log(`[history] 就绪补历史异常：${error?.message ?? error}`));
+         }
+         try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
+         // DSH 恢复后，把离线期间攒下的黑话学习窗口补触发
+@@ -3639,6 +3680,8 @@
+             scheduleProactiveCheckV2(key);
+           }
+           log('桥接模式已进入二代仿真模式，重建有限睡眠定时器');
++          // 同上：模式晚于 WS 就绪时，这一次补历史是漏消息的唯一补偿机会。
++          void runHistoryCatchUp('mode-ready').catch((error) => log(`[history] 模式就绪补历史异常：${error?.message ?? error}`));
+         }
+         log(`桥接模式已切换为: ${currentMode}`);
+         lastMode = currentMode;
+@@ -3756,9 +3799,15 @@
+         + '消息进不来。这不是桥接的问题。请查看 SnowLuma 的 logs/snowluma-*.log 里的 [Hook] 行'
+         + '（receive path stale / process enumeration timed out），并考虑升级 SnowLuma。';
+     } else if (silent) {
+-      hint = `已连接但 ${Math.round(agoMs / 60000)} 分钟没有收到任何事件包（连 30 秒一次的心跳都没有）。`
+-        + '这说明 SnowLuma 的 OneBot 服务/进程本身可能已经卡住或不在了，而不只是收不到 QQ 数据；'
+-        + '请直接查看 SnowLuma 的 logs/snowluma-*.log。';
++      const mins = Math.max(1, Math.round(agoMs / 60000));
++      // 2026-11-01：原来不管连没连上都写"已连接但…"，恰恰在**已经断开**时命中的分支，
++      // 把排查方向带偏（那次事故里 13:48 的告警就是这么误导的）。按 connected 分开措辞。
++      hint = snowlumaHealth.connected
++        ? `WebSocket 显示已连接，但已 ${mins} 分钟没有收到任何事件包（连 30 秒一次的心跳都没有）。`
++          + '这是半开连接：TCP 看着还开着、对端早就不推数据了。桥接会主动重建连接；'
++          + '若重建后仍不通，再查 SnowLuma 的 logs/snowluma-*.log。'
++        : `WebSocket 已断开 ${mins} 分钟（没收到 close 事件，属于静默断开）。`
++          + '桥接会主动重建连接；重建后仍连不上请查 SnowLuma 的 logs/snowluma-*.log。';
+     }
+     return {
+       // 只读 snowlumaHealth.connected（由 bot 的 open/close 维护），**不要**在这里引用
+@@ -3834,6 +3883,11 @@
+     setInterval(() => { void pollSnowlumaStatus(); }, SNOWLUMA_STATUS_POLL_MS);
+     // 边沿告警的兜底心跳：主信号（心跳 status.good）到达时会立刻评估，这里只防"心跳也没了"
+     setInterval(reportSnowlumaHealth, 30_000);
++    // 2026-11-01：和告警同频，但这个是**会动手**的那个 —— 入站停滞就重建 WS 客户端。
++    setInterval(() => {
++      try { checkInboundStall(); } catch (error) { log(`入站停滞看门狗出错（已兜住）：${error?.message ?? error}`); }
++    }, 30_000);
++    log(`入站停滞看门狗已启动（${Math.round(INBOUND_STALL_MS / 1000)} 秒收不到事件包即判停滞，连续两个周期才重建）`);
+   }
+ 
+   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
+@@ -15033,6 +15087,8 @@
+     // 用实际连接地址（自愈后可能与 config 里的初值不同，别打印过期的那个）
+     const connectedUrl = bot.url ?? cfg.snowluma.wsUrl;
+     snowlumaHealth.connected = true;
++    // 重建/重连后重新计时：checkInboundStall 用它区分"刚连上"与"连上很久没数据"。
++    snowlumaStartedAt = Date.now();
+     log(`SnowLuma 已连接：${connectedUrl}`);
+     // 「已连接」只说明与 SnowLuma 的 WebSocket 通了，**不说明 QQ 侧收得到消息** ——
+     // 这个区别见 startSnowlumaWatch 的说明。这里顺手把上游健康快照刷一次。
+@@ -15136,6 +15192,26 @@
+   }
+ 
+   let tokenHealAt = 0;
++  let tokenHealRetryTimer = null;
++  /**
++   * 自愈失败后不能再"这一刻试一次就永久放弃"。
++   *
++   * 2026-11-01 事故：自愈本身要打 OneBot HTTP（3000），而网关被踢下线/重启时它也不可用 ——
++   * 失败就 `return`，此后 10.5 小时没有任何一次重试机会，WS 也再没连回来。
++   * 这里加一个独立定时器：只在"还没连上"时每 60 秒重试一次（不依赖 close/error 边沿）。
++   */
++  function scheduleTokenHealRetry(reason) {
++    if (tokenHealRetryTimer) return;
++    if (snowlumaHealth.connected) return;
++    tokenHealRetryTimer = setTimeout(() => {
++      tokenHealRetryTimer = null;
++      if (snowlumaHealth.connected) return;
++      tokenHealAt = 0; // 绕过节流（定时器本身就是节流）
++      void healTokenIfStale(`retry(${String(reason).slice(0, 120)})`);
++    }, 60_000);
++    tokenHealRetryTimer.unref?.();
++  }
++
+   async function healTokenIfStale(reason) {
+     const now = Date.now();
+     if (now - tokenHealAt < 10000) return;   // 节流：close 事件会连续触发
+@@ -15144,12 +15220,15 @@
+       const r = await discoverSnowLumaConnection({ cfg, timeoutMs: 4000 });
+       if (!r.ok) {
+         log(`⚠️ token 自愈失败（${reason}）：${r.error}`);
++        scheduleTokenHealRetry(reason);
+         return;
+       }
+       await applyHealedTokens(r);
+       log(`   自愈完成：账号 ${r.self?.user_id ?? '?'}（${reason}）`);
++      if (tokenHealRetryTimer) { clearTimeout(tokenHealRetryTimer); tokenHealRetryTimer = null; }
+     } catch (error) {
+       log(`⚠️ token 自愈异常：${error?.message ?? error}`);
++      scheduleTokenHealRetry(reason);
+     }
+   }
+ 
+@@ -15172,6 +15251,74 @@
+     void healTokenIfStale(`error ${detail}`.trim().slice(0, 200));
+   });
+ 
++  // ── 入站停滞自愈（2026-11-01） ────────────────────────────────────────────
++  // 事故：NapCat 被风控踢下线后，这条 WS 变成"半开连接"——TCP 看着还开着、对端不再推数据，
++  // 于是 **SDK 的 close 事件永远不触发**，它自带的 reconnect（指数退避）也就没机会跑。
++  // 桥接的健康检测当时只打了日志，10.5 小时没人/没程序去救。
++  //
++  // 这里用"心跳静默"做判据主动重建客户端：先 close()（SDK 的 close 会把 socket/connectPromise
++  // 清干净），1 秒后 connect() 建新连接 —— 注意 SDK 的 connect() 在 isConnected 时会直接 return，
++  // 所以**必须先 close**，不能直接 connect。
++  let snowlumaStartedAt = Date.now();
++  let lastInboundRebuildAt = 0;
++  let inboundStallStreak = 0;
++  // NapCat 每 30 秒无条件发一次心跳；默认 120 秒没事件包就算停滞。
++  const INBOUND_STALL_MS = Math.max(120_000, Number(cfg.snowluma?.inboundStallMs) || 120_000);
++  const INBOUND_REBUILD_MIN_GAP_MS = 60_000;
++
++  function rebuildSnowlumaClient(reason) {
++    lastInboundRebuildAt = Date.now();
++    snowlumaStartedAt = Date.now();
++    log(`🔄 重建 SnowLuma WebSocket 客户端（${reason}）`);
++    try { bot.close(1000, 'inbound-stall'); } catch (error) { log(`   close 失败：${error?.message ?? error}`); }
++    snowlumaHealth.connected = false;
++    snowlumaHealth.lastPacketAt = 0;   // 重置静默计时，避免刚重建就又被判停滞
++    snowlumaHealth.lastPacketKind = '';
++    const timer = setTimeout(() => {
++      try {
++        bot.connect()
++          .then(() => log('   重建后已重新连接'))
++          .catch((error) => log(`   重建后连接失败（下个周期再试）：${error?.message ?? error}`));
++      } catch (error) {
++        log(`   重建 connect 异常：${error?.message ?? error}`);
++      }
++    }, 1000);
++    timer.unref?.();
++  }
++
++  /** 每 30 秒跑一次：连续两个周期都停滞才重建，避免一次抖动就重连。 */
++  function checkInboundStall() {
++    // 运维用：`touch state/force-inbound-rebuild` 即可手动触发一次重建，验证自愈链路。
++    try {
++      const forceFile = path.join(STATE_DIR, 'force-inbound-rebuild');
++      if (fs.existsSync(forceFile)) {
++        fs.unlinkSync(forceFile);
++        log('🧪 收到手动重建信号（state/force-inbound-rebuild），立即重建连接');
++        rebuildSnowlumaClient('手动触发');
++        return;
++      }
++    } catch {}
++    const now = Date.now();
++    const connected = snowlumaHealth.connected === true;
++    const hadPacket = snowlumaHealth.lastPacketAt > 0;
++    const agoMs = hadPacket ? now - snowlumaHealth.lastPacketAt : 0;
++    const stalled = connected
++      ? (!hadPacket || agoMs > INBOUND_STALL_MS)
++      : (now - snowlumaStartedAt > INBOUND_STALL_MS);
++    if (!stalled) { inboundStallStreak = 0; return; }
++    if (now - lastInboundRebuildAt < INBOUND_REBUILD_MIN_GAP_MS) return;
++    inboundStallStreak += 1;
++    if (inboundStallStreak < 2) {
++      const why = connected
++        ? (hadPacket ? `${Math.round(agoMs / 1000)} 秒没有事件包` : '连上后一直没收到事件包')
++        : 'WS 未连接';
++      log(`⚠️ 入站疑似停滞（${why}），再观察一个周期就重建连接`);
++      return;
++    }
++    inboundStallStreak = 0;
++    rebuildSnowlumaClient(connected ? '入站心跳静默' : 'WS 未连接');
++  }
++
+   // SnowLuma 尚未就绪时不阻塞桥接启动：SDK 自带后台重连，DSH 侧照常连接。
+   bot.connect().catch((error) => {
+     // 说明为什么"第一次连不上"在这里几乎是**必然**的，避免用户把它当成故障：

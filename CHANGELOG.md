@@ -11,6 +11,29 @@
   地址，而 Samba 只绑 LAN）。修法：LAN 名与 tailnet 全名都在 hosts 里固化，并关掉该机的
   MagicDNS。根因链与验证见 [cases/2026-10-31-istoreos-smb-access.md](cases/2026-10-31-istoreos-smb-access.md)。
 
+## [0.2.2] - 2026-11-01
+
+让桥接自己活过来：入站静默时**进程内**重建 WebSocket，不用等整进程重启。
+
+### Added
+
+- **桥接补丁 `deploy/patches/0002-bridge-inbound-selfheal.patch`**（5 处改动）：
+  1. 入站停滞自愈：120 秒没有事件包（NapCat 每 30 秒心跳）且连续两周期停滞 ⇒
+     `bot.close()` → 1 秒后重建连接。SDK 的 `reconnect` 只认 `close` 事件，半开连接永远不触发；
+  2. `healTokenIfStale()` 失败后 60 秒独立重试（原来试一次就永久放弃，而自愈要打的
+     HTTP 3000 恰恰同时不可用）；
+  3. 补历史触发点移到「DSH 就绪 + 模式确定为 reserved2」，不再被 `skipped:'mode'` 吞掉；
+  4. 单实例锁改成看 `/proc/<pid>/cmdline`，消除"新实例还没 listen 就被抢锁"的 TOCTOU；
+  5. 静默告警措辞按 `connected` 分开，不再"断开还说已连接"。
+- 运维钩子：`touch state/force-inbound-rebuild` 30 秒内手动触发一次重建，用来验证自愈链路。
+
+### Notes
+
+- 实测：手动重建 1 秒完成（close→自愈→reconnect），补历史首次真正跑通
+  （`[history] … 补回 0 条群友消息 / 2 条自己的旧消息（dsh-ready）`，水位去重正常）。
+- 换文件重启桥接时空窗只有几秒；外部看门狗仍是兜底（内部自愈失败时才会走整进程重启）。
+- SurfCore 升级会覆盖 `src/bridge.js`，这 5 处要重打，见 `deploy/patches/README.md`。
+
 ## [0.2.1] - 2026-11-01
 
 修「能发不能收」：桥接聋了 10.5 小时，自己知道，但没人（也没程序）去救。

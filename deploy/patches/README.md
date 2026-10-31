@@ -16,6 +16,22 @@ OneBot send_private_msg 失败: 文件处理失败: 识别URL失败, uri= /root/
 
 网关侧 OneBot 实现支持 `base64://`（NapCat / SnowLuma 都支持），转 SILK 照旧由网关做。
 
+## 0002-bridge-inbound-selfheal.patch
+
+2026-11-01「聋了 10.5 小时」事故的根治补丁（复盘见 `cases/2026-11-01-qq-inbound-deaf.md`）。
+改 5 处，全部围绕「入站断了要自己活过来」：
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `startSnowlumaWatch()` + `snowlumaHealth` | 新增**入站停滞自愈**：120 秒收不到任何事件包（NapCat 每 30 秒发心跳）且连续两个检查周期都停滞 ⇒ `bot.close()` 后 1 秒重建连接。SDK 自带的 `reconnect` 只认 `close` 事件，半开连接永远不会触发它 |
+| 2 | `healTokenIfStale()` | 自愈失败不再"试一次就永久放弃"：起一个 60 秒的独立重试定时器（原来失败就 `return`，而自愈要打的 HTTP 3000 恰恰同时不可用） |
+| 3 | `checkDsh()` 的 `dshReady` / 模式切换分支 | 在「DSH 就绪 + 模式确定为 reserved2」时补一次 `runHistoryCatchUp`。原来补历史挂在 WS `open` 上，而模式就绪晚于 open ⇒ 被判 `skipped:'mode'`，漏的消息再也补不回来 |
+| 4 | `acquireLock()` | 「PID 活着 + 端口空闲 ⇒ 锁过期」改成看 `/proc/<pid>/cmdline` 是不是 `bridge.js`。新实例从写锁到真正 listen 之间有十几秒，原逻辑在这个窗口会把锁抢走（双实例隐患） |
+| 5 | `snowlumaHealthSnapshot()` | 静默告警的措辞按 `connected` 分开：原来在**已经断开**时也说"已连接但…"，把排查方向带偏 |
+
+附带一个运维钩子：`touch state/force-inbound-rebuild` 可以在 30 秒内手动触发一次重建，
+用来验证自愈链路（不需要等真的出事）。
+
 ## 怎么打
 
 ```sh
@@ -23,9 +39,15 @@ cd <surfcore>
 git init  # 若不是 git 仓库，先备份
 patch -p1 --dry-run < .../0001-surfcore-record-base64.patch   # 先试
 patch -p1 < .../0001-surfcore-record-base64.patch
+# 0002 是 2026-11-01 的入站自愈补丁；基线是「打完 0001（和 replay 那版本地改动）之后」的 bridge.js
+patch -p1 < .../0002-bridge-inbound-selfheal.patch
 node --check src/bridge.js
 # 重启桥接
 ```
+
+> ⚠️ 0002 的 `diff` 基线是**这台机器当时线上那份** `bridge.js`（含 0001 与 replay 本地改动），
+> 不是上游原版。换机器/升级 SurfCore 后先看 `patch --dry-run` 输出，冲突就按上面的表格手改。
+> 容器里没有 `patch` 命令，可以在宿主机或本地打完再 `docker cp` 进去。
 
 ## 注意
 

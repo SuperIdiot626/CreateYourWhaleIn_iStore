@@ -115,19 +115,44 @@ NapCat HTTP 可达  AND  桥接 /api/status.snowluma 满足任一：
 为什么选外部看门狗：**不需要重启桥接**今晚就生效，且复用已经验证过的重启链路
 （本次 00:09:38 `/api/restart` → 00:11:17 插件拉起，99 秒）。
 
-### 下一步（需要一次桥接重启窗口）：让桥接自己恢复
+### 已上线（2）：桥接内部自愈（`deploy/patches/0002-bridge-inbound-selfheal.patch`）
 
-外部看门狗重启整进程，最坏有约 100 秒空窗（这期间消息照样丢）。根治要改 `src/bridge.js`：
+外部看门狗重启整进程，最坏有约 100 秒空窗（这期间消息照样丢）。所以当天又改了 `src/bridge.js`：
 
-| 优先级 | 改哪里 | 做什么 |
-|---|---|---|
-| 必须 | `startSnowlumaWatch()` `3829-3837` | 静默超过 90~120 秒 ⇒ `bot.close()` 后重建客户端并 `connect()`（`bot` 要从 `const` 改 `let`，handler 抽成 `wireBot()`），连续失败两次才升级为退出 |
-| 必须 | `healTokenIfStale()` `15138-15154` | 自愈失败**不要 return**：起一个 60 秒的独立重试定时器（不受 close/error 边沿约束） |
-| 必须 | `runHistoryCatchUp` 触发点 | 在 `bridge.js:3614`（`dshReady && mode==='reserved2'` 首次成立）补一次调用，与 WS open 解耦 |
-| 建议 | `acquireLock()` `1343-1388` | 去掉"端口空闲即判过期"的单次采样；改成"PID 存活即认为在跑" |
-| 建议 | `handleIncoming` 各 return 分支 | 加限频丢弃计数并在 `/api/status` 暴露，让"没到"和"到了被过滤"可区分 |
-| 建议 | `appendSocialV2Message()` `12309` | 按 `messageId` 实时去重（现在只有补历史去重），防客户端重建导致重复回复 |
-| 顺手 | `snowlumaHealthSnapshot()` `3758-3762` | `silent` 分支按 `connected` 分开措辞，别再说"已连接" |
+| # | 改哪里 | 做了什么 | 状态 |
+|---|---|---|---|
+| 1 | `startSnowlumaWatch()` + `snowlumaHealth` | 入站停滞自愈：120 秒没有事件包（NapCat 每 30 秒发心跳）且连续两周期停滞 ⇒ `bot.close()` → 1 秒后重建连接。SDK 的 `reconnect` 只认 `close` 事件，半开连接永远不触发它 | ✅ 已上线 |
+| 2 | `healTokenIfStale()` | 自愈失败改成"60 秒后独立重试"，不再试一次就永久放弃（原来失败就 `return`） | ✅ 已上线 |
+| 3 | `checkDsh()` 的 ready / 模式切换分支 | 「DSH 就绪 + 模式确定 reserved2」时补一次 `runHistoryCatchUp`，与 WS `open` 解耦 | ✅ 已上线 |
+| 4 | `acquireLock()` | 锁过期判据改看 `/proc/<pid>/cmdline` 而不是端口（消除"新实例还没 listen 就被抢锁"的 TOCTOU） | ✅ 已上线 |
+| 5 | `snowlumaHealthSnapshot()` | 静默告警措辞按 `connected` 分开，不再"断开还说已连接" | ✅ 已上线 |
+| — | 运维钩子 | `touch state/force-inbound-rebuild` 30 秒内触发一次手动重建（验证自愈链路用） | ✅ 已上线 |
+
+上线与验证（01:00）：
+
+```
+00:59:59 入站停滞看门狗已启动（120 秒收不到事件包即判停滞，连续两个周期才重建）
+00:59:59 SnowLuma 已连接：ws://127.0.0.1:3001
+01:00:00 [history] private:1078820859 补回 0 条群友消息 / 2 条自己的旧消息（dsh-ready）
+01:00:29 🧪 收到手动重建信号（state/force-inbound-rebuild），立即重建连接
+01:00:29 🔄 重建 SnowLuma WebSocket 客户端（手动触发）
+01:00:29 SnowLuma 连接断开（code=1000），重连中…
+01:00:30 SnowLuma 已连接：ws://127.0.0.1:3001
+01:00:30    重建后已重新连接
+```
+
+- 补历史从"被 `skipped:'mode'` 跳过"变成真的跑了（只补回 2 条自己的旧消息，水位去重正常，
+  没有把 23:59 那批旧消息重灌——`historyWatermark` 取 `lastIncomingAt` 与 recent 时间的最大值）。
+- 手动重建整链路 1 秒完成：close→自愈→reconnect→`connected:true`、`lastPacketAgoMs` 恢复为秒级。
+- 换文件重启期间入站空窗只有几秒（新进程 00:59:59 起来），锁与 3100 端口交接正常。
+
+### 还值得做的
+
+| 优先级 | 做什么 |
+|---|---|
+| 建议 | `handleIncoming` 各 return 分支加限频丢弃计数并在 `/api/status` 暴露，让"没到"和"到了被过滤"可区分 |
+| 建议 | `appendSocialV2Message()` 按 `messageId` 实时去重（现在只有补历史去重），防客户端重建导致重复回复 |
+| 可选 | `/api/restart` 做成软重启（只重建 WS + DSH 事件流，不退出进程），彻底消除 ~100 秒空窗 |
 
 ## 验证
 
@@ -143,14 +168,18 @@ NapCat HTTP 可达  AND  桥接 /api/status.snowluma 满足任一：
 
 ## 回滚与残余
 
-- 停用：删掉宿主 crontab 里那行 `*/2 * * * * …qq-watchdog.py`（人肉恢复完全不受影响）。
+- 停用看门狗：删掉宿主 crontab 里那行 `*/2 * * * * …qq-watchdog.py`（人肉恢复完全不受影响）。
   crontab 备份 `/root/backups/crontab.bak-20261101-004920`；脚本备份 `/root/backups/qq-watchdog.py.20261101-004914`。
-- 残余 1：整进程重启仍有约 100 秒空窗，窗口内消息会丢 → 靠上面"让桥接自己恢复"。
-- 残余 2：锁文件曾为空的原因未查清；双实例被 3100 占用拦下，但没有告警级日志。
-- 残余 3：补历史的竞态（根因 3）**没修**，所以下次重连后漏掉的消息仍大概率补不回来。
-  眼下可以用 `POST /api/socialV2/history-catchup {force:true}` 手动补（本次没做，怕给旧消息
-  触发重复回复；主人是自己转发过来的）。
+- 回滚桥接补丁：容器内 `/root/backups/bridge.js.bak-before-selfheal-20261101-005951`
+  （以及更早的 `bridge.js.bak-pre-watchdog-20261101-005728`）。`cp` 回去 → 重启桥接即可。
+  补丁本体在 `deploy/patches/0002-bridge-inbound-selfheal.patch`。
+- 残余 1：**SurfCore 升级会覆盖 `src/bridge.js`**，这 5 处要重打（见 patches/README.md 的表格）。
+- 残余 2：整进程重启（外部看门狗那条路）仍有约 100 秒空窗；内部自愈不重启进程，
+  所以只有在"连 WS 都重建不起来"时才会走到那条路。
+- 残余 3：锁文件曾为空的原因未查清；不过抢锁判据已经改成看命令行，这类隐患基本堵上了。
 - 残余 4：看门狗只写日志，没有推送给主人（微信/钉钉都没接）。
+- 残余 5：23:59–00:07 那批消息**永久丢了**（补历史的水位已过它们；主人自己转发过来补上的）。
+  以后再出现同类静默，补历史能在恢复时把窗口内的消息捞回来。
 
 ## 附：对那份《QQ只出不进-故障总结》的核对
 
