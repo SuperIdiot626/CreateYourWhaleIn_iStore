@@ -16,6 +16,7 @@
 | 🗣️ 语音条 | ✅ v0.2.0 | Edge 引擎（免费）可一行切引擎；语气标记真的改语速/音高/停顿；高频短语气预热；契约自检 14 项 |
 | 💬 B站评论 | ✅ v0.1.0 | 放开「桥接工具白名单」+「插件 autoComment / dmMode」两道闸 |
 | 🛡️ 安全闸门 | ✅ | 语音仅主人触发、2 条/分钟、10 条/小时；B站每轮最多 1 条评论 |
+| 🩺 入站自愈 | ✅ v0.2.1 | 「假在线、其实聋了」的桥接 2 分钟内被看门狗发现并重启（NapCat 心跳 5 分钟不来即判定） |
 | 🐋 群聊节奏 | ✅ | 分条发送、按概率插话、潜水/唤醒、收尾判断（由 SurfCore 提供） |
 
 ## 架构
@@ -41,6 +42,7 @@ persona/          示例人格卡 + 说明（**真实人格卡不入库**，见 
 preset/           qq-chat-v2 预设里的语音规则，可直接贴回 SurfCore
 deploy/
   voice-edge/     voxd 契约的语音引擎（server.py 分段+韵律 / engine.json 切引擎 / prewarm 预热 / selftest 自检）
+  qq-watchdog/    入站看门狗：桥接「假在线、其实聋了」时自动重启（宿主 cron，每 2 分钟）
   patches/        SurfCore 桥接的本地补丁（跨容器 record base64）
   apply_config.py 一键写配置（语音 + B站评论 + 工具白名单，带备份、幂等）
 docs/             架构、语音链路、B站评论闸门、ADR

@@ -11,6 +11,28 @@
   地址，而 Samba 只绑 LAN）。修法：LAN 名与 tailnet 全名都在 hosts 里固化，并关掉该机的
   MagicDNS。根因链与验证见 [cases/2026-10-31-istoreos-smb-access.md](cases/2026-10-31-istoreos-smb-access.md)。
 
+## [0.2.1] - 2026-11-01
+
+修「能发不能收」：桥接聋了 10.5 小时，自己知道，但没人（也没程序）去救。
+
+### Added
+
+- **入站看门狗 `deploy/qq-watchdog/`**：宿主 cron 每 2 分钟检查一次
+  `NapCat 可达 + 桥接 /api/status.snowluma 静默/断线/降级` → 调 `/api/restart`
+  （失败则按 `/proc` 找 `bridge.js` 发 SIGTERM，由 DSH 插件 2 分钟内拉起）。
+  限频 10 分钟一次、每小时 4 次。判据用 `lastPacketAgoMs`（NapCat 每 30 秒无条件发心跳），
+  夜里没人说话不会误判；NapCat 自己挂掉时只记录不重启。
+
+### Notes
+
+- 桥接**本来就有**健康检测（`snowlumaHealth`，10 分钟静默告警，`bridge.js:3699+`），
+  缺口是"发现之后没有动作"——不是没有观测。
+- 出站走 HTTP 3000、入站走 WS 3001，是两条通道；「能发」不能推断「能收」。
+- 真正根治要改桥接（静默时主动重建 WS 客户端、补历史触发点与模式就绪解耦），
+  见 [cases/2026-11-01-qq-inbound-deaf.md](cases/2026-11-01-qq-inbound-deaf.md)。
+- 复盘纠正了一份外部故障总结里的四处理解（次因不成立、`readThroughSeq` 不是入站指标、
+  健康接口与补历史都已有、重复日志不是双实例）。
+
 ## [0.2.0] - 2026-10-31
 
 让她的语气真的能听出来，以及「换引擎」从口号变成一行配置。
