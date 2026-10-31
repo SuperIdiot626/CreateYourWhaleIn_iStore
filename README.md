@@ -13,7 +13,7 @@
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | 🎭 群友人设 | ✅ | 小鲸鱼角色卡：短句、口语、傲娇、会潜水会摸鱼、去 AI 味黑名单 |
-| 🗣️ 语音条 | ✅ v0.1.0 | edge-tts 引擎（免费），口语稿、40 字内、1~3 条短语音、语气标记、语音库短语气 |
+| 🗣️ 语音条 | ✅ v0.2.0 | Edge 引擎（免费）可一行切引擎；语气标记真的改语速/音高/停顿；高频短语气预热；契约自检 14 项 |
 | 💬 B站评论 | ✅ v0.1.0 | 放开「桥接工具白名单」+「插件 autoComment / dmMode」两道闸 |
 | 🛡️ 安全闸门 | ✅ | 语音仅主人触发、2 条/分钟、10 条/小时；B站每轮最多 1 条评论 |
 | 🐋 群聊节奏 | ✅ | 分条发送、按概率插话、潜水/唤醒、收尾判断（由 SurfCore 提供） |
@@ -40,7 +40,7 @@ flowchart LR
 persona/          示例人格卡 + 说明（**真实人格卡不入库**，见 persona/README.md）
 preset/           qq-chat-v2 预设里的语音规则，可直接贴回 SurfCore
 deploy/
-  voice-edge/     voxd 契约的 edge-tts 引擎（server.py / start.sh / cron 兜底）
+  voice-edge/     voxd 契约的语音引擎（server.py 分段+韵律 / engine.json 切引擎 / prewarm 预热 / selftest 自检）
   patches/        SurfCore 桥接的本地补丁（跨容器 record base64）
   apply_config.py 一键写配置（语音 + B站评论 + 工具白名单，带备份、幂等）
 docs/             架构、语音链路、B站评论闸门、ADR
@@ -52,7 +52,7 @@ ROADMAP.md        下一步
 ## 快速开始
 
 1. 先按 SurfCore 的 README 装好：DSH + SurfCore 插件 + SnowLuma/NapCat，能正常收发 QQ 消息。
-2. 部署语音引擎：见 [deploy/voice-edge/README.md](deploy/voice-edge/README.md)。
+2. 部署语音引擎：见 [deploy/voice-edge/README.md](deploy/voice-edge/README.md)（含预热 `prewarm.py` 与自检 `selftest.py`）。
 3. 写配置：`python3 deploy/apply_config.py --owner-qq <你的QQ> --bili-name <你的B站昵称>`。
 4. 重启桥接（`POST /api/restart` 或重启容器），私聊她说句话，看她会不会发语音条。
 

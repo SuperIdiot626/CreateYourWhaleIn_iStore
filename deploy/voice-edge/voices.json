@@ -1,10 +1,33 @@
 {
-  "_说明": "character 是桥接配置里 tts.character 填的角色名；voice 是 edge-tts 的音色 id。",
+  "_说明": "character 是桥接配置里 tts.character 填的角色名；voice 是引擎的音色 id（edge 引擎=微软音色 id；openai 引擎=模型侧音色名）。prewarm 是「开机预热」的短句：跑一次 prewarm.py 就把它们预生成进缓存，之后发这些短语气是 0 延迟命中。_prewarmCharacter 决定预热用哪个角色（缺省取 characters 里第一个）。",
   "default": "zh-CN-XiaoyiNeural",
   "characters": {
     "xiaoyu": "zh-CN-XiaoyiNeural",
     "xiaoyi": "zh-CN-XiaoyiNeural",
     "xiaoxiao": "zh-CN-XiaoxiaoNeural",
     "xiaoxuan": "zh-CN-XiaoxuanNeural"
-  }
+  },
+  "_prewarmCharacter": "xiaoyu",
+  "prewarm": [
+    "嗯",
+    "嗯嗯",
+    "诶",
+    "诶？",
+    "啊？",
+    "哦",
+    "好呀",
+    "行吧",
+    "在的",
+    "哈哈",
+    "[笑]哈哈",
+    "确实",
+    "真的假的",
+    "等等",
+    "草",
+    "不是吧",
+    "好困",
+    "才不是呢",
+    "我哪知道",
+    "你不要乱说"
+  ]
 }

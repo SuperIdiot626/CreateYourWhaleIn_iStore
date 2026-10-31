@@ -8,7 +8,7 @@
 |---|---|---|
 | `napcat` / SnowLuma | 独立容器 | QQ 协议网关，OneBot v11（WebSocket + HTTP），负责收发消息、SILK 转码 |
 | `dsh` | 独立容器 | DeepSeek Harness：agent 运行时、Web GUI、SurfCore 插件、桥接进程 |
-| `voice-edge` | 与桥接**同一个**容器 | 文字 → 音频（voxd 契约，监听 `127.0.0.1:8765`） |
+| `voice-edge` | 与桥接**同一个**容器 | 文字 → 音频（voxd 契约，监听 `127.0.0.1:8765`；v2 按语气标记分段 + 韵律） |
 | DSH agent 会话 | dsh 容器内（in-process） | 按预设 + 人格卡生成回复，决定打字还是说话 |
 
 > ⚠️ 桥接与网关**不同容器**这个事实很关键：桥接拿到的是自己容器里的绝对路径，网关看不到。
@@ -23,7 +23,8 @@
 4. agent 决定：打字 / 发语音
 5. 发语音：qq_send_voice(text="…")
    → 桥接 POST http://127.0.0.1:8765/v1/speak/file
-   → voice-edge: edge-tts 合成 mp3 → ffmpeg 转 24k 单声道 WAV
+   → voice-edge: 按语气标记分段 → 每段按各自 rate/pitch/volume 合成 mp3
+     → ffmpeg 转 24k 单声道 WAV → 按停顿拼接成一条
    → 桥接读字节 → base64 → OneBot record 段
 6. NapCat 收 base64 → 转 NT SILK → 发 QQ 语音条
 7. 桥接 get_msg 回读 record 段 → verified=true 才算落地

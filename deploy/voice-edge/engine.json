@@ -1,0 +1,21 @@
+{
+  "_说明": "voice-edge 的引擎与韵律配置。改完重启 voice-edge 生效；临时试别的引擎可以设环境变量 VOICE_EDGE_ENGINE=openai（环境变量优先于本文件）。",
+  "engine": "edge",
+  "edge": {
+    "proxy": ""
+  },
+  "openai": {
+    "baseUrl": "",
+    "model": "tts-1",
+    "voice": "alloy",
+    "apiKeyEnv": "VOICE_OPENAI_KEY",
+    "format": "mp3"
+  },
+  "prosody": {
+    "base": {
+      "rate": "+0%",
+      "pitch": "+0Hz",
+      "volume": "+0%"
+    }
+  }
+}
