@@ -11,6 +11,28 @@
   地址，而 Samba 只绑 LAN）。修法：LAN 名与 tailnet 全名都在 hosts 里固化，并关掉该机的
   MagicDNS。根因链与验证见 [cases/2026-10-31-istoreos-smb-access.md](cases/2026-10-31-istoreos-smb-access.md)。
 
+## [0.2.7] - 2026-11-01
+
+发码不再动容器：先走 NapCat WebUI 的轻刷新，失败才退回重启。
+
+### Changed
+
+- `deploy/qq-ops/qq-ops.py` 的 `--send-qr` 变成两级：
+  1. **轻刷新**：`POST /api/QQLogin/RefreshQRcode` 让 NapCat 的登录服务当场重吐一张码
+     （不重启容器、**不走"快速登录"**，1~2 秒完成）；
+  2. 轻刷新失败才退回 `docker restart napcat`（约 20 秒，会多一次快速登录尝试）。
+- 新增 `--probe-webui` 排障模式：验证 WebUI 鉴权与登录态。
+
+### Notes
+
+- 主人提的顾虑成立：重启 NapCat 会先发一次必然失败的"快速登录"，等于多敲一次门，风控上不划算。
+  轻刷新直接让登录服务重出码，避开了这一步。
+- NapCat WebUI 的鉴权不是直接传 token：`POST /api/auth/login {"hash": sha256(token + ".napcat")}`
+  → 拿到 base64 签名 Credential → 之后 `Authorization: Bearer <Credential>`（1 小时有效）。
+  WebUI 端口配置写 6099，运行时可能被挑成别的（当前 6101），脚本从启动日志里读。
+- 轻刷新路径**还没在"掉登录"状态下实测过**（她当时在线，接口回 `QQ Is Logined`）；
+  但它失败会自动退回重启，所以功能不会因这条新路径挂掉。
+
 ## [0.2.6] - 2026-11-01
 
 按主人要求收紧：**不重复提醒**，发码**每次现场生成**，不再复用容器里的旧码。
