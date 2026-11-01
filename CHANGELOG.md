@@ -20,6 +20,32 @@
   地址，而 Samba 只绑 LAN）。修法：LAN 名与 tailnet 全名都在 hosts 里固化，并关掉该机的
   MagicDNS。根因链与验证见 [cases/2026-10-31-istoreos-smb-access.md](cases/2026-10-31-istoreos-smb-access.md)。
 
+## [0.2.8] - 2026-11-01
+
+QQ 动图（GIF/WebP 表情）取不到、也「动不了」——两个独立问题一起修。
+
+### Added
+
+- **`src/media-normalize.js`（随 `deploy/patches/0004-media-normalize.patch`）**：
+  用 ffprobe/ffmpeg 把收到的图归一化成「模型能看的几张小 JPEG」——
+  动图等距抽 ≤3 帧、静图缩一张，长边 ≤960、单帧 ≤900KB；
+  `fetchOneBotImage()` 取到字节后先归一化，`resolveMediaList()` / `fetchMediaData()`
+  按帧推给模型和工具，并带 `[动图，已抽 3 帧，按顺序看]` 的说明。
+- `socialV2.media.maxBytes` 8MB → 24MB（bridge clamp 上限 20MB → 32MB）。
+  先取回来再归一化，不再因为「动图表情超过 8MB」直接放弃。
+
+### Fixed
+
+- 市场表情的 `raw300.gif` 兜底 404、主链超 8MB 导致「图片获取失败」。
+- 动图在模型眼里只有一帧（"动不了"）——现在给 3 帧，能看出在动。
+
+### Notes
+
+- 单测：852KB GIF → 3 帧 × ~45KB；1920×1440 静图 → 1 帧 36KB。
+- 收藏表情那条路仍用原始字节，避免收藏的动图变成静图。
+- 端到端（真实 QQ 表情）待主人重发一张验证；复盘见
+  [cases/2026-11-01-media-gif-webp.md](cases/2026-11-01-media-gif-webp.md)。
+
 ## [0.2.7] - 2026-11-01
 
 发码不再动容器：先走 NapCat WebUI 的轻刷新，失败才退回重启。

@@ -54,6 +54,20 @@ OneBot send_private_msg 失败: 文件处理失败: 识别URL失败, uri= /root/
 > 11-01 01:33 被踢 → 09 小时离线就是这个（NapCat 干等扫码，`3000`/`3001` 全程没开，
 > 桥接一直在正确地重试，但没码就没戏）。
 
+## 0004-media-normalize.patch
+
+2026-11-01：QQ 动图（GIF/WebP 表情）取不到、也「动不了」。改 3 处 + 新增 1 个模块：
+
+| 位置 | 改动 |
+|---|---|
+| 新增 `src/media-normalize.js` | 用 ffprobe/ffmpeg 把收到的图归一化成「模型能看的几张小 JPEG」：动图等距抽 ≤3 帧，静图缩一张，长边 ≤960、单帧 ≤900KB |
+| `fetchOneBotImage()` | 取到原始字节后先归一化，返回 `{frames, animated, note}`；失败退回原图 |
+| `resolveMediaList()` / `fetchMediaData()` | 两个消费方都按帧推给模型 / 工具，并带 `[动图，已抽 3 帧]` 说明 |
+| `config.json` 的 `socialV2.media.maxBytes` | 8MB → 24MB（bridge 侧 clamp 上限 20MB → 32MB），先取回来再归一化 |
+
+为什么：QQ 动图表情常常 >8MB（旧上限直接拒绝，CDN 兜底又 404），而就算取到，模型也只看得到一帧。
+归一化之后 8MB 动图 → 3 帧 × 45KB，既取得到、又能"看见动作"。
+
 ## 怎么打
 
 ```sh
@@ -65,6 +79,8 @@ patch -p1 < .../0001-surfcore-record-base64.patch
 patch -p1 < .../0002-bridge-inbound-selfheal.patch
 # 0003 的第二层对账补丁，基线是「打完 0002 之后」的 bridge.js
 patch -p1 < .../0003-bridge-inbound-reconcile.patch
+# 0004 的媒体归一化补丁，基线是「打完 0003 之后」的 bridge.js；新文件会一起创建
+patch -p1 < .../0004-media-normalize.patch
 node --check src/bridge.js
 # 重启桥接
 ```
