@@ -46,6 +46,9 @@ ALERT = os.path.join(HOST_IM, "qq-alerts.log")
 WX = f"{CONT_IM}/bin/wx-notify.mjs"
 QR_CONT = "/app/napcat/cache/qrcode.png"        # NapCat 容器里的二维码
 NAPCAT_WEBUI_CFG = "/mnt/sata1-4/napcat/config/webui.json"  # WebUI 的 token 在这里
+# 微信侧「发码」请求文件：容器里没有 docker，只能让宿主机 cron（本脚本）来执行
+SEND_QR_REQ = os.path.join(HOST_IM, "state", "send-qr-request")  # 宿主机路径；容器里看到的是 /root/.dsh/im/state/…
+NAPCAT_CONTAINER = "napcat"
 QR_RAW_HOST = "/tmp/qq-qr-raw.png"
 QR_BIG_HOST = "/tmp/qq-qr-scan.png"
 QR_BIG_CONT = f"{CONT_IM}/qr-scan.png"
@@ -229,6 +232,80 @@ def light_refresh_qr():
     return None
 
 
+def napcat_running():
+    r = sh(["docker", "inspect", NAPCAT_CONTAINER, "--format", "{{.State.Running}}"], timeout=15)
+    return (r.stdout or "").strip() == "true"
+
+
+def ensure_napcat_up(wait_s=60):
+    """NapCat 容器没在跑就拉起来 —— 否则连码都生成不了。"""
+    if napcat_running():
+        return True
+    log("NapCat 容器没在跑，自动启动")
+    r = sh(["docker", "start", NAPCAT_CONTAINER], timeout=90)
+    if r.returncode != 0:
+        log(f"启动 NapCat 失败：{(r.stderr or r.stdout)[:200]}")
+        return False
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        if port_open(6101):
+            log("NapCat 已启动（WebUI 就绪）")
+            push_text(f"⚠️ 发现 NapCat 容器没在跑，已自动启动（{time.strftime('%m-%d %H:%M')}）")
+            return True
+        time.sleep(2)
+    log("NapCat 启动后 WebUI 还没就绪")
+    return napcat_running()
+
+
+def napcat_guard():
+    """每分钟一次的健康检查：只管"容器没在跑"这种明确故障，**不**自动重启容器。
+
+    为什么不"端口不通就重启"：NapCat 掉登录时 3000/3001 本来就不通，
+    这时候重启容器只会多一次登录尝试（风控），不会让 QQ 自己回来。
+    掉登录该走「发码」这条人工确认路径。
+    """
+    if napcat_running():
+        return
+    log("NapCat 容器没在跑（dangling），尝试拉起")
+    ensure_napcat_up()
+
+
+def do_send_qr(online, force=False):
+    """发码：先确保 NapCat 活着，再轻刷新出码，推图 + 推链接。"""
+    if online and not force:
+        push_text("QQ 现在在线，不用发码。要重发新码就等我这边看到掉线，或者带 --force。")
+        return 0
+    if not ensure_napcat_up():
+        push_text("⚠️ 想发码，但 NapCat 起不来。我这边继续查。")
+        return 1
+    mtime, age = force_new_qr()
+    if not mtime:
+        push_text("⚠️ 想发新码，但 NapCat 没吐出二维码。先别扫，我这边再查。")
+        return 1
+    if not stage_qr():
+        push_text("⚠️ 二维码拿到了但处理失败（拷贝/放大）。先别扫，我这边再查。")
+        return 1
+    ok = push_qr_image(
+        f"二维码来了（{time.strftime('%H:%M')} 刚生成，约 2 分钟有效）。"
+        f"扫完回我一声；过期了就说「重发」，我再给你一张新的。"
+    )
+    qr_url = current_qr_url()
+    if qr_url:
+        push_text(
+            "扫不了的话用这个（不用扫）：在手机 QQ 里直接打开下面的链接，"
+            "会跳到「确认登录」，点确认就行。\n"
+            f"{qr_url}"
+        )
+    st = load_state()
+    st["pendingScan"] = False
+    st["lastQrPushAt"] = time.time()
+    st["qrPushedMtime"] = mtime
+    st["offlineAlerted"] = True
+    save_state(st)
+    log(f"【人工确认】已推送新生成的二维码（{age} 秒前，成功={ok}）")
+    return 0 if ok else 1
+
+
 def current_qr_url():
     """取 NapCat 当前二维码对应的解码链接（https://txz.qq.com/p?k=...）。
 
@@ -352,38 +429,24 @@ def main():
         return 0
 
     if "--send-qr" in args:
-        if online and "--force" not in args:
-            print("QQ 现在在线，不用发码（真要发就加 --force）")
-            return 0
         # 不复用容器里那张旧码：每次都在你确认的这一刻重新生成一张
-        mtime, age = force_new_qr()
-        if not mtime:
-            push_text("⚠️ 想发新码，但 NapCat 没吐出二维码。先别扫，我这边再查。")
-            return 1
-        if not stage_qr():
-            push_text("⚠️ 二维码拿到了但处理失败（拷贝/放大）。先别扫，我这边再查。")
-            return 1
-        ok = push_qr_image(
-            f"二维码来了（{time.strftime('%H:%M')} 刚生成，约 2 分钟有效）。"
-            f"扫完回我一声；过期了就说「重发」，我再给你一张新的。"
-        )
-        # 只有一台手机时没法"扫自己屏幕上的码" ⇒ 把解码链接也发过去，
-        # 手机 QQ 点开链接就能直接确认登录（不用扫）。
-        qr_url = current_qr_url()
-        if qr_url:
-            push_text(
-                "扫不了的话用这个（不用扫）：在手机 QQ 里直接打开下面的链接，"
-                "会跳到「确认登录」，点确认就行。\n"
-                f"{qr_url}"
-            )
-        st = load_state()
-        st["pendingScan"] = False
-        st["lastQrPushAt"] = now
-        st["qrPushedMtime"] = mtime
-        st["offlineAlerted"] = True
-        save_state(st)
-        log(f"【人工确认】已推送新生成的二维码（{age} 秒前，成功={ok}）")
-        return 0 if ok else 1
+        return do_send_qr(online, force="--force" in args)
+
+    # ── NapCat 容器守护：只在"容器没在跑"时动手（掉登录不算，那是发码的事）──
+    napcat_guard()
+
+    # ── 微信侧「发码」请求（容器里没有 docker，只能写文件让宿主机 cron 执行）──
+    req_path = SEND_QR_REQ
+    try:
+        if os.path.exists(req_path):
+            req_age = time.time() - os.path.getmtime(req_path)
+            os.remove(req_path)
+            if req_age <= 180:
+                log(f"收到微信侧发码请求（文件触发，{int(req_age)} 秒前）")
+                return do_send_qr(port_open(3000))
+            log("忽略过期的发码请求（超过 3 分钟）")
+    except OSError as e:
+        log(f"处理发码请求失败：{e}")
 
     st = load_state()
     st = seed_kicks_from_log(st)
