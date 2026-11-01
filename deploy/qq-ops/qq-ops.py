@@ -15,9 +15,9 @@
   4. 在线但桥接没连上（假在线/聋了）超过 5 分钟 → 推一条提醒（30 分钟最多一条）。
 
 **两段式发码**（2026-11-01 主人要求）：
-  被踢 → 只推一段说明（不附码）→ 主人回「发码」→ 脚本先确认现成码够不够新，
-  不够新就重启 NapCat 逼它重新出码 → 再推图。这样码永远不会在"你还没准备好"的时候白过期。
-  掉线期间每 30 分钟提醒一次（最多 3 次），确认后不再提醒。
+  被踢 → 只推说明（不附码，也不重复提醒）→ 主人回「发码」→ 脚本**当场**重启 NapCat
+  让它生成一张全新二维码 → 再推图。不复用容器里那张旧码：实测 NapCat 掉登录后只吐
+  一张码就停住、不会自己刷新，而 QQ 的码约 2 分钟失效，所以留着的基本都是废码。
 
 用法：
     python3 qq-ops.py             # 正常跑（cron 里也这么调）
@@ -46,14 +46,11 @@ QR_RAW_HOST = "/tmp/qq-qr-raw.png"
 QR_BIG_HOST = "/tmp/qq-qr-scan.png"
 QR_BIG_CONT = f"{CONT_IM}/qr-scan.png"
 
-QR_STALE_S = 150          # 要发码时，超过这个岁数就重启 NapCat 逼它出新的
 QR_WAIT_S = 90            # 重启 NapCat 后等新码最多等多久
 FREQ_WINDOW_S = 6 * 3600  # 被踢频率窗口
 FREQ_MIN_KICKS = 2        # 窗口内 ≥2 次就提醒
 FREQ_WARN_GAP_S = 6 * 3600
 DEAF_WARN_GAP_S = 1800
-REMIND_GAP_S = 1800       # 没确认扫码时，多久提醒一次
-REMIND_MAX = 3            # 一次掉线最多提醒几次（别烦人）
 
 
 # ─────────────── 基础 ───────────────
@@ -151,20 +148,17 @@ def stage_qr():
     return ff.returncode == 0 and os.path.exists(QR_BIG_HOST)
 
 
-def fresh_qr(force_restart=True):
-    """拿一张"现在就能扫"的二维码。
+def force_new_qr():
+    """当场让 NapCat 生成一张新码（不复用旧文件）。
 
-    只有现成的码够新（< QR_STALE_S）才直接用；否则重启 NapCat 逼它重新出码
-    （掉登录状态下重启 NapCat = 重新走一遍登录流程 = 吐一张新码）。
+    实测：NapCat 掉登录后只吐**一张**码就停住，不会自己刷新（9 小时离线窗口里只有 1 次
+    「二维码已保存」）；而 QQ 的码约 2 分钟失效，所以容器里那张基本都是废码。
+    因此"发码"= 重启 NapCat（掉登录状态下重启 = 重新走登录流程 = 吐一张新码）。
+
     返回 (mtime, age)；失败 (None, None)。
     """
-    mtime, age = qr_file_info()
-    if mtime and age is not None and age <= QR_STALE_S:
-        return mtime, age
-    if not force_restart:
-        return None, None
-    log(f"现有二维码不够新（{age if age is not None else '?'} 秒），重启 NapCat 逼它出新码…")
     t0 = time.time()
+    log("按主人要求生成新码：重启 NapCat…")
     r = sh(["docker", "restart", "napcat"], timeout=90)
     if r.returncode != 0:
         log(f"重启 NapCat 失败：{(r.stderr or r.stdout)[:200]}")
@@ -173,8 +167,8 @@ def fresh_qr(force_restart=True):
     while time.time() < deadline:
         time.sleep(3)
         mtime, age = qr_file_info()
-        # 要求是重启之后写的、而且足够新
-        if mtime and mtime >= int(t0) - 5 and age is not None and age <= 120:
+        # 必须是这次重启之后写的（mtime >= 重启时刻），否则还是旧文件
+        if mtime and mtime >= int(t0) - 2 and age is not None and age <= 90:
             log(f"NapCat 已出新码（{age} 秒前，等了 {int(time.time() - t0)} 秒）")
             return mtime, age
     log(f"等 {QR_WAIT_S} 秒还没等到新二维码")
@@ -247,26 +241,25 @@ def main():
         if online and "--force" not in args:
             print("QQ 现在在线，不用发码（真要发就加 --force）")
             return 0
-        mtime, age = fresh_qr(force_restart=True)
+        # 不复用容器里那张旧码：每次都在你确认的这一刻重新生成一张
+        mtime, age = force_new_qr()
         if not mtime:
             push_text("⚠️ 想发新码，但 NapCat 没吐出二维码。先别扫，我这边再查。")
             return 1
         if not stage_qr():
             push_text("⚠️ 二维码拿到了但处理失败（拷贝/放大）。先别扫，我这边再查。")
             return 1
-        mins = max(1, round(age / 60))
         ok = push_qr_image(
-            f"二维码来了（{time.strftime('%H:%M')} 生成，约 2 分钟有效）。"
+            f"二维码来了（{time.strftime('%H:%M')} 刚生成，约 2 分钟有效）。"
             f"扫完回我一声；过期了就说「重发」，我再给你一张新的。"
         )
         st = load_state()
         st["pendingScan"] = False
-        st["remindCount"] = 0
         st["lastQrPushAt"] = now
         st["qrPushedMtime"] = mtime
         st["offlineAlerted"] = True
         save_state(st)
-        log(f"【人工确认】已推送二维码（{mins} 分钟前生成，成功={ok}）")
+        log(f"【人工确认】已推送新生成的二维码（{age} 秒前，成功={ok}）")
         return 0 if ok else 1
 
     st = load_state()
@@ -281,7 +274,6 @@ def main():
         st["offlineSince"] = 0
         st["offlineAlerted"] = False
         st["pendingScan"] = False
-        st["remindCount"] = 0
         # 在线但桥接没连上：假在线/聋了
         if connected is False and now - float(st.get("lastDeafWarn") or 0) > DEAF_WARN_GAP_S:
             st["lastDeafWarn"] = now
@@ -290,12 +282,11 @@ def main():
         save_state(st)
         return 0
 
-    # ── 掉线：只发说明，不发码 ──
+    # ── 掉线：只发说明，不发码，也不重复提醒 ──
     if prev is not False:
         st["offlineSince"] = now
         st["qrPushedMtime"] = 0
         st["pendingScan"] = True      # 等主人确认"我现在方便扫"
-        st["remindCount"] = 0
         st["notifiedAt"] = now
         st["offlineAlerted"] = True
         warn = note_kick(st, now)
@@ -303,7 +294,7 @@ def main():
         push_text(
             f"⚠️ 小鲸鱼被踢下线了（{time.strftime('%m-%d %H:%M')}）。\n"
             f"我先不给你发码——你忙完、手边方便扫码的时候，回我一句「发码」，"
-            f"我立刻生成一张能扫的新二维码推给你（码只有约 2 分钟有效期）。"
+            f"我当场生成一张新码推给你（码只有约 2 分钟有效期）。"
         )
         if warn:
             push_text(warn)
@@ -311,14 +302,7 @@ def main():
         save_state(st)
         return 0
 
-    # ── 掉线中：等确认，隔一段时间提醒一次（最多 3 次）──
-    if st.get("pendingScan") and int(st.get("remindCount") or 0) < REMIND_MAX:
-        if now - float(st.get("lastRemindAt") or st.get("notifiedAt") or 0) > REMIND_GAP_S:
-            st["lastRemindAt"] = now
-            st["remindCount"] = int(st.get("remindCount") or 0) + 1
-            mins = int((now - float(st.get("offlineSince") or now)) / 60)
-            push_text(f"提醒：小鲸鱼还离线（已 {mins} 分钟）。方便扫码就说「发码」，我马上把新码推给你。")
-
+    # ── 掉线中：不提醒（主人要求），静默等「发码」──
     st["lastOnline"] = False
     save_state(st)
     return 0
