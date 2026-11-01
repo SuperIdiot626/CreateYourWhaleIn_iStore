@@ -48,7 +48,8 @@ QR_CONT = "/app/napcat/cache/qrcode.png"        # NapCat 容器里的二维码
 NAPCAT_WEBUI_CFG = "/mnt/sata1-4/napcat/config/webui.json"  # WebUI 的 token 在这里
 # 微信侧「发码」请求文件：容器里没有 docker，只能让宿主机 cron（本脚本）来执行
 SEND_QR_REQ = os.path.join(HOST_IM, "state", "send-qr-request")  # 宿主机路径；容器里看到的是 /root/.dsh/im/state/…
-NAPCAT_CONTAINER = "napcat"
+QQ_BACKEND = "snowluma"            # 2026-11-02 从 napcat 切到 snowluma
+QQ_CONTAINER = "snowluma"          # 2026-11-02 起 QQ 后端换成了 SnowLuma（NapCat 已停用，容器保留回滚）
 QR_RAW_HOST = "/tmp/qq-qr-raw.png"
 QR_BIG_HOST = "/tmp/qq-qr-scan.png"
 QR_BIG_CONT = f"{CONT_IM}/qr-scan.png"
@@ -233,7 +234,7 @@ def light_refresh_qr():
 
 
 def napcat_running():
-    r = sh(["docker", "inspect", NAPCAT_CONTAINER, "--format", "{{.State.Running}}"], timeout=15)
+    r = sh(["docker", "inspect", QQ_CONTAINER, "--format", "{{.State.Running}}"], timeout=15)
     return (r.stdout or "").strip() == "true"
 
 
@@ -241,16 +242,16 @@ def ensure_napcat_up(wait_s=60):
     """NapCat 容器没在跑就拉起来 —— 否则连码都生成不了。"""
     if napcat_running():
         return True
-    log("NapCat 容器没在跑，自动启动")
-    r = sh(["docker", "start", NAPCAT_CONTAINER], timeout=90)
+    log(f"QQ 容器（{QQ_CONTAINER}）没在跑，自动启动")
+    r = sh(["docker", "start", QQ_CONTAINER], timeout=90)
     if r.returncode != 0:
-        log(f"启动 NapCat 失败：{(r.stderr or r.stdout)[:200]}")
+        log(f"启动 {QQ_CONTAINER} 失败：{(r.stderr or r.stdout)[:200]}")
         return False
     deadline = time.time() + wait_s
     while time.time() < deadline:
         if port_open(6101):
-            log("NapCat 已启动（WebUI 就绪）")
-            push_text(f"⚠️ 发现 NapCat 容器没在跑，已自动启动（{time.strftime('%m-%d %H:%M')}）")
+            log(f"{QQ_CONTAINER} 已启动（WebUI 就绪）")
+            push_text(f"⚠️ 发现 QQ 容器（{QQ_CONTAINER}）没在跑，已自动启动（{time.strftime('%m-%d %H:%M')}）")
             return True
         time.sleep(2)
     log("NapCat 启动后 WebUI 还没就绪")
@@ -266,12 +267,51 @@ def napcat_guard():
     """
     if napcat_running():
         return
-    log("NapCat 容器没在跑（dangling），尝试拉起")
+    log(f"QQ 容器（{QQ_CONTAINER}）没在跑（dangling），尝试拉起")
     ensure_napcat_up()
 
 
+
+def do_send_qr_snowluma(online, force=False):
+    """SnowLuma 的发码：重启容器 → 等它出码 → 从虚拟屏幕截图裁二维码 → 推微信。
+
+    代价比 NapCat 的"轻刷新"大（约 30~40 秒 + 一次登录尝试），但 SnowLuma 没有
+    NapCat 那种 WebUI 刷新接口，这是最稳的一条路。
+    """
+    if online and not force:
+        push_text("QQ 现在在线，不用发码。")
+        return 0
+    if not ensure_napcat_up():
+        push_text("⚠️ 想发码，但 QQ 容器（SnowLuma）起不来。我这边继续查。")
+        return 1
+    log(f"重启 {QQ_CONTAINER} 让它重新出码…")
+    sh(["docker", "restart", QQ_CONTAINER], timeout=150)
+    time.sleep(7)
+    got = False
+    for _ in range(20):
+        if capture_snowluma_qr(QR_RAW_HOST):
+            got = True
+            break
+        time.sleep(3)
+    if not got:
+        push_text("⚠️ SnowLuma 起来了，但没截到登录二维码。先别扫，我这边再查。")
+        return 1
+    cp = sh(["docker", "cp", QR_RAW_HOST, f"dsh:{CONT_IM}/qr-scan.png"], timeout=30)
+    if cp.returncode != 0:
+        push_text("⚠️ 二维码截到了但传不进容器，先别扫。")
+        return 1
+    ok = push_qr_image(
+        f"二维码来了（{time.strftime('%H:%M')} 刚出，约 2 分钟有效）。"
+        f"扫完回我一声；过期了就说「重发」。"
+    )
+    log(f"【人工确认】SnowLuma 二维码已推送（成功={ok}）")
+    return 0 if ok else 1
+
+
 def do_send_qr(online, force=False):
-    """发码：先确保 NapCat 活着，再轻刷新出码，推图 + 推链接。"""
+    """发码：按后端分派（SnowLuma 走截图，NapCat 走 WebUI 轻刷新）。"""
+    if QQ_BACKEND == "snowluma":
+        return do_send_qr_snowluma(online, force)
     if online and not force:
         push_text("QQ 现在在线，不用发码。要重发新码就等我这边看到掉线，或者带 --force。")
         return 0
@@ -306,6 +346,27 @@ def do_send_qr(online, force=False):
     return 0 if ok else 1
 
 
+
+def capture_snowluma_qr(dest=QR_RAW_HOST):
+    """SnowLuma 没有 NapCat 那种"二维码文件"，只能从它的虚拟屏幕截图再裁。
+
+    登录窗口位置固定（1920x1080、窗口在 770,230 起 420x560），裁完再放大。
+    """
+    try:
+        r = sh(["docker", "exec", QQ_CONTAINER, "sh", "-c",
+                "ffmpeg -y -loglevel error -f x11grab -video_size 1920x1080 -i :1 -frames:v 1 /tmp/qr-full.png && "
+                "ffmpeg -y -loglevel error -i /tmp/qr-full.png -vf "
+                "'crop=420:560:770:230,scale=840:1120:flags=lanczos' /tmp/qr-crop.png"], timeout=90)
+        if r.returncode != 0:
+            log(f"截取 SnowLuma 屏幕失败：{(r.stderr or r.stdout)[:150]}")
+            return False
+        cp = sh(["docker", "cp", f"{QQ_CONTAINER}:/tmp/qr-crop.png", dest], timeout=30)
+        return cp.returncode == 0 and os.path.exists(dest)
+    except Exception as e:
+        log(f"截取 SnowLuma 二维码异常：{e}")
+        return False
+
+
 def current_qr_url():
     """取 NapCat 当前二维码对应的解码链接（https://txz.qq.com/p?k=...）。
 
@@ -337,11 +398,11 @@ def force_new_qr():
     got = light_refresh_qr()
     if got:
         return got
-    log("轻量刷新没成功，退回重启 NapCat…")
+    log(f"轻量刷新不可用（SnowLuma 没有 NapCat 的 WebUI 接口），退回重启 {QQ_CONTAINER}…")
     t0 = time.time()
-    r = sh(["docker", "restart", "napcat"], timeout=90)
+    r = sh(["docker", "restart", QQ_CONTAINER], timeout=90)
     if r.returncode != 0:
-        log(f"重启 NapCat 失败：{(r.stderr or r.stdout)[:200]}")
+        log(f"重启 {QQ_CONTAINER} 失败：{(r.stderr or r.stdout)[:200]}")
         return None, None
     deadline = t0 + QR_WAIT_S
     while time.time() < deadline:

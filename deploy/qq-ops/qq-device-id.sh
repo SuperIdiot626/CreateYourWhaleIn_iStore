@@ -22,8 +22,8 @@ set -u
 STATE_DIR="${QQ_STATE_DIR:-/mnt/sata1-4/dsh/home/im}"
 LOG="$STATE_DIR/qq-device-id.log"
 BAK="$STATE_DIR/device-backup"
-CONTAINER="${QQ_CONTAINER:-napcat}"
-MACHINE_INFO_HOST="${QQ_MACHINE_INFO:-/mnt/sata1-4/napcat/qq/global/nt_data/msf/machine-info}"
+CONTAINER="${QQ_CONTAINER:-snowluma}"
+MACHINE_INFO_HOST="${QQ_MACHINE_INFO:-/mnt/sata1-4/snowluma/data/config/machine-id}"
 
 mkdir -p "$BAK" 2>/dev/null || true
 
