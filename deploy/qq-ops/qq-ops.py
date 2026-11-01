@@ -55,6 +55,9 @@ FREQ_WINDOW_S = 6 * 3600  # 被踢频率窗口
 FREQ_MIN_KICKS = 2        # 窗口内 ≥2 次就提醒
 FREQ_WARN_GAP_S = 6 * 3600
 DEAF_WARN_GAP_S = 1800
+# 在线但桥接没连上：要"持续"这么久才报警。
+# 刚扫码上线时 NapCat 先通、桥接后连（实测空窗 10~40 秒），立刻报就是误报 —— 2026-11-01 15:58 误报过一次。
+DEAF_ALERT_AFTER_S = 300
 
 
 # ─────────────── 基础 ───────────────
@@ -370,11 +373,18 @@ def main():
         st["offlineSince"] = 0
         st["offlineAlerted"] = False
         st["pendingScan"] = False
-        # 在线但桥接没连上：假在线/聋了
-        if connected is False and now - float(st.get("lastDeafWarn") or 0) > DEAF_WARN_GAP_S:
-            st["lastDeafWarn"] = now
-            push_text(f"⚠️ QQ 在线但桥接没连上 OneBot（{time.strftime('%m-%d %H:%M')}）。"
-                      f"桥接会自己重建连接；如果 5 分钟后还没好，我这边会再看。")
+        # 在线但桥接没连上：假在线/聋了。
+        # 只有"持续超过 DEAF_ALERT_AFTER_S"才报警：扫码登录后桥接要几秒到几十秒才连上，
+        # 在那之前报警就是误报（2026-11-01 15:58 就报过一次，实际 15:58:39 已正常发消息）。
+        if connected is False:
+            if not st.get("deafSince"):
+                st["deafSince"] = now
+            elif now - float(st["deafSince"]) >= DEAF_ALERT_AFTER_S and now - float(st.get("lastDeafWarn") or 0) > DEAF_WARN_GAP_S:
+                st["lastDeafWarn"] = now
+                push_text(f"⚠️ QQ 在线但桥接没连上 OneBot 已超过 {DEAF_ALERT_AFTER_S // 60} 分钟（{time.strftime('%m-%d %H:%M')}）。"
+                          f"桥接会自己重建连接；如果 5 分钟后还没好，我这边会再看。")
+        else:
+            st["deafSince"] = 0
         save_state(st)
         return 0
 
@@ -382,6 +392,7 @@ def main():
     if prev is not False:
         st["offlineSince"] = now
         st["qrPushedMtime"] = 0
+        st["deafSince"] = 0
         st["pendingScan"] = True      # 等主人确认"我现在方便扫"
         st["notifiedAt"] = now
         st["offlineAlerted"] = True
