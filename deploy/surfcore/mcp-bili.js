@@ -9,8 +9,10 @@
 // 凭据：/root/.dsh/surfcore/bili/credentials.json（与 bili.mjs 同一份，600）
 //
 // 边界（写死在代码里）：
-//   · 只做「点赞 / 收藏 / 读评论」，不做发评论、不发私信、不投币、不改配置；
+//   · 点赞 / 收藏 / 读评论 / **发动态**，不做发评论、不发私信、不投币、不改配置；
 //   · 发评论仍走插件的 bili_reply（那边有语感闸和判重表，别绕过）；
+//   · 发动态**不再定时**：四类动态的自动排期已关（dynamics.enabled=false），
+//     改成她想发/主人让她发时才调 dynamic_post；
 //   · 每个动作都有每日上限和最小间隔，撞风控自动冷却，超限明确报错而不是静默失败。
 //
 // 接口（都是从 surfcore tools 里核对过的）：
@@ -20,8 +22,10 @@
 //   评论点赞   POST /x/v2/reply/action                {oid, type=1, rpid, action: 1/0}
 //   楼中楼     GET  /x/v2/reply/reply?type=1&oid=&root=&ps=&pn=
 //   回复我的   GET  /x/msgfeed/reply?platform=web&build=0&mobi_app=web&cursor=
+//   发动态     走 bili.mjs dynamic post（WBI 签名 + 额度闸 + 出站身份闸都在它里面）
 
 import fs from 'node:fs';
+import { execFile } from 'node:child_process';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -477,6 +481,134 @@ server.tool(
       .filter((x) => !since || x.at >= since)
       .slice(0, Math.min(Math.max(Number(limit) || 20, 1), 50));
     return textResult({ ok: true, kind: k, count: items.length, lastViewAt: Number(j?.data?.last_view_at ?? 0) || 0, items });
+  },
+);
+
+// ── 发动态（手动，不再定时）─────────────────────────────────────────────────
+//
+// 为什么不自己实现 B站 的动态接口：
+//   `bili.mjs dynamic post` 里已经有三道必须的东西，自己重写一定会漏：
+//     ① WBI 签名（create/dyn 这个接口要 w_rid）
+//     ② 额度闸 `gate({type:'dynamic'})`（shareDaily 每天几条）
+//     ③ 出站身份闸 `assertOutboundIdentitySafe` —— 动态是公开面，
+//        一旦把她主人的 QQ 号/B站 mid 贴出去就收不回来，这里是硬拦不是提示
+const BILI_MJS = '/root/.dsh/plugins/surfcore/tools/bili.mjs';
+const NODE_BIN = '/usr/local/bin/node';
+
+function runBili(args, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    execFile(
+      NODE_BIN,
+      [BILI_MJS, ...args],
+      { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, cwd: '/root/.dsh/surfcore' },
+      (error, stdout, stderr) => {
+        const code = error ? (typeof error.code === 'number' ? error.code : 1) : 0;
+        resolve({
+          code,
+          ok: code === 0,
+          stdout: String(stdout ?? '').trim(),
+          stderr: String(stderr ?? '').trim(),
+          ...(error && typeof error.code !== 'number' ? { error: String(error.message ?? error).slice(0, 300) } : {}),
+        });
+      },
+    );
+  });
+}
+
+server.tool(
+  'dynamic_post',
+  [
+    '在**她自己的 B站 账号**发一条动态（公开，所有人可见）。',
+    '调用前先想清楚：这条发出去就有人看到，不能撤回（只能随后 dynamic_remove 删）。',
+    '正文会过 SurfCore 的出站身份闸——不能写主人的 QQ 号、别人的 mid 这类东西，会被直接拒绝。',
+    'dryRun=true 只彩排不发（返回将要发出的正文和报文），确认无误再传 false 真发。',
+    '每天有额度（默认 3 条，走 SurfCore 的额度闸），超了会被拒。',
+  ].join(''),
+  {
+    text: z.string().min(1).max(2000).describe('动态正文（真发前建议先 dryRun 看一眼）'),
+    dryRun: z.boolean().optional().describe('true=只彩排不发布（默认 false）'),
+  },
+  async ({ text, dryRun }) => {
+    const picked = await runBili(['dynamic', 'post', '--text', String(text), dryRun ? '--dry' : '--go']);
+    return textResult({
+      ok: picked.ok,
+      dryRun: Boolean(dryRun),
+      action: 'dynamic_post',
+      chars: String(text).length,
+      output: picked.ok ? picked.stdout : `${picked.stdout}\n${picked.stderr}`.trim(),
+      ...(picked.error ? { error: picked.error } : {}),
+      ...(picked.ok && !dryRun ? { hint: '发出去就是公开的；反悔只能用 dynamic_remove 删掉' } : {}),
+    });
+  },
+);
+
+server.tool(
+  'dynamic_list',
+  '列出她自己 B站 账号最近的动态（只读）。用来确认某条到底发出去没有、以及拿到 dynamic id 以便删除。',
+  { limit: z.number().int().positive().optional().describe('最多返回几条，默认 10') },
+  async ({ limit }) => {
+    const account = loadAccount();
+    if (!account.hasCred) return textResult({ ok: false, error: '没有 B站凭据（缺失 sessdata/bili_jct）' });
+    // 注意：SurfCore 自带的 `dynamic list` 用的是已废弃的 api.vc.bilibili.com 老接口，
+    // 现在返回 HTML 不是 JSON（上游 bug）。这里改用现行的 web-dynamic space feed。
+    let j = {};
+    try {
+      j = await callJson(
+        `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${encodeURIComponent(account.mid)}`,
+        { account, referer: `https://space.bilibili.com/${account.mid}/dynamic` },
+      );
+    } catch (error) {
+      return textResult({ ok: false, error: `请求失败：${String(error?.message ?? error).slice(0, 200)}` });
+    }
+    if (Number(j?.code) !== 0) {
+      return textResult({ ok: false, code: j?.code ?? null, message: String(j?.message ?? ''), error: '读取动态列表失败' });
+    }
+    const items = (j?.data?.items ?? []).slice(0, Math.min(Math.max(Number(limit) || 10, 1), 50)).map((it) => ({
+      id: String(it?.id_str ?? it?.id ?? ''),
+      type: String(it?.type ?? ''),
+      time: Number(it?.modules?.module_author?.pub_ts ?? 0) || 0,
+      text: String(it?.modules?.module_dynamic?.desc?.text ?? ''),
+      bvid: String(it?.modules?.module_dynamic?.major?.archive?.bvid ?? ''),
+    }));
+    // 空间列表接口对 DRAW 类动态**不返回正文**（实测 desc 为 null），
+    // 要拿正文必须逐条查 detail 接口。这里并发补齐，失败就留空、不影响列表。
+    await Promise.all(
+      items.map(async (it) => {
+        if (it.text || !it.id) return;
+        try {
+          const d = await callJson(
+            `https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=${encodeURIComponent(it.id)}`,
+            { account, referer: 'https://t.bilibili.com/' },
+          );
+          const md = d?.data?.item?.modules?.module_dynamic;
+          it.text = String(md?.desc?.text ?? '');
+          const arch = md?.major?.archive;
+          if (arch?.bvid) it.bvid = String(arch.bvid);
+        } catch {
+          // 单条失败不影响整张列表
+        }
+      }),
+    );
+    return textResult({ ok: true, mid: account.mid, count: items.length, items });
+  },
+);
+
+server.tool(
+  'dynamic_remove',
+  '删掉她自己 B站 账号的一条动态（需要 dynamic id，用 dynamic_list 取）。只能删自己的。发错了用它补救。',
+  {
+    id: z.string().min(1).describe('动态 id（dynamic_list 里能看到）'),
+    dryRun: z.boolean().optional().describe('true=只彩排不删（默认 false）'),
+  },
+  async ({ id, dryRun }) => {
+    const r = await runBili(['dynamic', 'rm', '--id', String(id), dryRun ? '--dry' : '--go']);
+    return textResult({
+      ok: r.ok,
+      dryRun: Boolean(dryRun),
+      action: 'dynamic_remove',
+      id: String(id),
+      output: r.ok ? r.stdout : `${r.stdout}\n${r.stderr}`.trim(),
+    });
   },
 );
 

@@ -10,6 +10,11 @@
   走独立 MCP server（`deploy/surfcore/mcp-bili.js`，工具前缀 `mcp__bili__`），
   不碰插件的 node_modules（重装会被冲掉）；每类写操作都有每日上限（点赞 30 / 收藏 3）、
   最小间隔和撞风控自动冷却 30 分钟。发评论仍走原有 `bili_reply`。
+- **发动态改成「想发才发」**：SurfCore 自带的「四类动态」（每天 8/12/16/20 各一条）
+  用 `dynamics.enabled=false` 关掉；新增 `dynamic_post` / `dynamic_list` / `dynamic_remove`
+  三个工具，她想发或主人让她发时才发，`dryRun` 可先彩排。发动态仍走 `bili.mjs dynamic post`，
+  保留 WBI 签名 + 额度闸 + 出站身份闸（实测把 QQ 号写进正文会被拒且不发出）。
+  说明见 [docs/bili-comment.md](docs/bili-comment.md)。
   说明见 [docs/bili-comment.md](docs/bili-comment.md)，部署见
   [deploy/surfcore/README.md](deploy/surfcore/README.md)。
 

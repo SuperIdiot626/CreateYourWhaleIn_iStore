@@ -1,6 +1,7 @@
 # B站互动 · 独立 MCP server
 
-给 QQ 里的「小鲸鱼」加一套**B站互动**能力：点赞视频、收藏视频、点赞评论、看评论回复。
+给 QQ 里的「小鲸鱼」加一套**B站互动**能力：点赞视频、收藏视频、点赞评论、看评论回复、
+**想发才发动态**。
 
 「发评论」不在这里 —— 它走插件自带的 `bili_reply`（那边有语感闸和判重表，别绕过）。
 
@@ -23,6 +24,12 @@
 | `comment_like` | 给评论点赞 / 取消 | 30 |
 | `comment_replies` | 读某条评论下的楼中楼（只读） | — |
 | `received_replies` | 看「谁回复了我 / 谁 @了我」（只读） | — |
+| `dynamic_post` | **发一条动态**（`dryRun=true` 先彩排） | SurfCore 额度闸（默认 3） |
+| `dynamic_list` | 列自己发过的动态（只读，用来拿 id） | — |
+| `dynamic_remove` | 删掉自己的一条动态（发错补救） | — |
+
+> **动态不再定时**：SurfCore 自带的「四类动态」每天 8/12/16/20 会各发一条，
+> 已用 `config.json` 的 `dynamics.enabled=false` 关掉；现在只有她/主人想发时才发。
 
 公共行为：
 
@@ -40,6 +47,11 @@
 | 收件箱字段不可信 | `/x/msgfeed/reply` 的 `item.title` 不总是新回复正文，要确认内容得用 `root`/`parent` 配 `comment_replies` 回读楼层 |
 | 19 位 id 丢精度 | 动态 id 超过 JS 安全整数，`JSON.parse` 会截断；优先从 `item.uri` 里取字符串 id |
 | 楼中楼会回吐 root | 没有子回复时 `/x/v2/reply/reply` 把 root 自己塞回来，工具里已过滤 |
+| **发动态不要自己实现** | `bili.mjs dynamic post` 里有三样自己写必漏的东西：WBI 签名（`w_rid`）、额度闸 `gate({type:'dynamic'})`、**出站身份闸** `assertOutboundIdentitySafe`（拦住把主人 QQ 号/mid 贴到公开面）。工具是 shell 出去调它 |
+| `bili.mjs dynamic list` **上游已坏** | 用的是废弃的 `api.vc.bilibili.com/.../space_history`，现在返回 HTML → `JSON.parse` 直接抛错。所以 `dynamic_list` 改成自己查 `x/polymer/web-dynamic/v1/feed/space` |
+| 空间列表**不给 DRAW 类动态正文** | 实测 `module_dynamic.desc` 是 `null`，正文只在 `/x/polymer/web-dynamic/v1/detail?id=<id>` 里 → 列表工具逐条补详情 |
+| `dynamic rm` 的老接口**还能用** | `api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/rm_dynamic` 仍返回 `code=0 成功`，删除继续走 `bili.mjs dynamic rm` |
+| **`--dry` 不校验身份闸** | `dynamic.mjs` 的 dry 分支在 `gate`/`assertOutboundIdentitySafe` **之前**就 `exit(0)`。彩排只验 URL/报文，真正的身份拦截发生在真发时（实测含 QQ 号会被拒且不发出） |
 
 ## 部署步骤
 
