@@ -56,15 +56,24 @@ if (!commentOn && !args.force) return { ok:false, blocked:true, hint:'…' }
 
 ---
 
-# 评论区点赞（2026-11-01）
+# B站互动：点赞视频 / 收藏视频 / 点赞评论 / 看回复（2026-11-01）
 
-「发评论」之外，她还想给别人的评论**点赞**。原来整套工具链里没有这个能力
-（`bili-duty/mcp_server.py` 没有 `reply/action`，插件里也没有），所以补了一个独立 MCP。
+「发评论」之外，她还要**点赞视频、收藏视频、点赞评论、看谁回复了她**。
+整套工具链里这些能力**一个都没有**（`bili-duty/mcp_server.py` 没有 `reply/action`，
+也没有视频点赞/收藏的实现），所以补了一个独立的 MCP server。
 
 ## 形态
 
-- 工具：`mcp__bili__comment_like`（`status=false` 即取消点赞）
-- 接口：`POST https://api.bilibili.com/x/v2/reply/action`，载荷 `{oid, type=1, rpid, action, csrf}`
+工具前缀统一 `mcp__bili__`：
+
+| 工具 | 作用 | 每日上限 |
+|---|---|---|
+| `video_like` | 视频点赞 / 取消 | 30 |
+| `video_fav` | 收藏 / 移除（默认进「默认收藏夹」，可指定 `folder`） | **3** |
+| `comment_like` | 评论点赞 / 取消 | 30 |
+| `comment_replies` | 读某条评论下的楼中楼（只读） | — |
+| `received_replies` | 看「谁回复了我 / 谁 @了我」（只读） | — |
+
 - 凭据：`/root/.dsh/surfcore/bili/credentials.json`（和 `bili.mjs` / 鱼群保护同一份）
 - 部署与升级影响面：见 [`../deploy/surfcore/README.md`](../deploy/surfcore/README.md)
 
@@ -77,14 +86,26 @@ if (!commentOn && !args.force) return { ok:false, blocked:true, hint:'…' }
 
 所以走和 `mcp-qzone.js` 同样的形态：SurfCore `src/` 下一个独立 stdio MCP。
 
+## 接口踩过的坑
+
+| 坑 | 说明 |
+|---|---|
+| **视频取消点赞是 `like=2`** | `POST /x/web-interface/archive/like`：`1`=点赞、`2`=取消，**不是 0**（评论点赞才是 0/1） |
+| 收藏要 `rid`=aid | `POST /x/v3/fav/resource/deal`：`rid`=aid、`type=2`、`add_media_ids`/`del_media_ids` 二选一 |
+| 收件箱字段不可信 | `/x/msgfeed/reply` 的 `item.title` 不总是新回复正文 → 要确认内容，用 `root`/`parent` 配 `comment_replies` 回读楼层 |
+| 19 位 id 丢精度 | 动态 id 超过 JS 安全整数，`JSON.parse` 会截断 → 优先从 `item.uri` 取字符串 id |
+| 楼中楼回吐 root | 没有子回复时 `/x/v2/reply/reply` 把 root 自己塞回来 → 工具里已过滤，返回 `count:0` + hint |
+
 ## 三道刹车
 
-1. **每日上限 30 次**（`BILI_COMMENT_LIKE_MAX_PER_DAY`）
-2. **最小间隔 2 秒**（`BILI_COMMENT_LIKE_MIN_GAP_MS`）
+1. **每日上限**：点赞 30 / 收藏 3（收藏移除不占额度）
+2. **最小间隔**：点赞 2 秒、收藏 3 秒
 3. **风控冷却**：返回 -509 / 12015 / 12035 / 12051 / 12011 时写 `blockedUntil = now + 30min`
 
 超限时**明确返回拒绝**（带 `dailyLimit` / `retryAfterMs`），不做「静默失败」——
-静默失败会让模型以为点上了，然后反复重试。
+静默失败会让模型以为操作成功了，然后反复重试。
+
+状态落在 `bili/action-state.json`，按北京时间切日。
 
 ## 验证
 
@@ -93,16 +114,23 @@ if (!commentOn && !args.force) return { ok:false, blocked:true, hint:'…' }
 ```js
 import { apply } from '/root/.dsh/surfcore/plugins/surfcore/qq-tool-restrict.mjs';
 let guard; apply({ tools: { restrict() {}, guard(fn) { guard = fn; } } });
-for (const n of ['mcp__bili__comment_like', 'bili_reply', 'pwsh', 'read'])
+for (const n of ['mcp__bili__video_like', 'mcp__bili__video_fav', 'mcp__bili__comment_like',
+                 'mcp__bili__comment_replies', 'mcp__bili__received_replies', 'bili_reply',
+                 'pwsh', 'read'])
   console.log(n, guard({ name: n }) ? 'DENIED' : 'ALLOWED');
 ```
 
-期望：`mcp__bili__comment_like` / `bili_reply` → ALLOWED，`pwsh` / `read` → DENIED。
+期望：五个 `mcp__bili__*` 与 `bili_reply` → ALLOWED；`pwsh` / `read` → DENIED。
 
-端到端（可逆，不对外留痕）：对她的**自己**的一条评论先点赞再取消，两次都应 `code: 0`。
+端到端（全部可逆，测完立刻撤）：对同一支视频
+`video_like(true)` → `video_like(false)`、`video_fav(true)` → `video_fav(false)`、
+`comment_like(true)` → `comment_like(false)`，三次写操作都应 `code: 0`；
+两次读（`comment_replies` / `received_replies`）应返回真实数据。
 
 ## 边界
 
-- 只做点赞/取消点赞，**不发评论、不发私信、不改配置**。
-- 评论内容与点赞对象都由模型决定，仍受 `identity-guard.js` 约束（不在公开面复述私密信息）。
-- 点赞**对方可能收到通知**，所以提示词里写了「只在真的觉得好时才用，不要刷」。
+- 只做**点赞 / 收藏 / 读评论**：不发评论、不发私信、不投币、不改配置。
+- 发评论仍走插件 `bili_reply`（那边有语感闸、判重表和报备），别绕过它。
+- 点赞/收藏**对方可能收到通知**，所以提示词里写了「只在真的觉得好时才用，不要刷」，
+  并明确「点错了立刻用 `status=false` 撤掉」。。
+

@@ -6,9 +6,10 @@
 
 ### Added
 
-- **B站评论区点赞**：小鲸鱼现在能在评论区给评论点赞 / 取消点赞（`mcp__bili__comment_like`）。
-  走独立 MCP server（`deploy/surfcore/mcp-bili-comment.js`），不碰插件 node_modules；
-  带每日上限 30 次 + 最小间隔 2 秒 + 撞风控自动冷却 30 分钟。发评论仍走原有 `bili_reply`。
+- **B站互动四件套**：小鲸鱼现在能**点赞视频、收藏视频、点赞评论、看评论回复**。
+  走独立 MCP server（`deploy/surfcore/mcp-bili.js`，工具前缀 `mcp__bili__`），
+  不碰插件的 node_modules（重装会被冲掉）；每类写操作都有每日上限（点赞 30 / 收藏 3）、
+  最小间隔和撞风控自动冷却 30 分钟。发评论仍走原有 `bili_reply`。
   说明见 [docs/bili-comment.md](docs/bili-comment.md)，部署见
   [deploy/surfcore/README.md](deploy/surfcore/README.md)。
 
