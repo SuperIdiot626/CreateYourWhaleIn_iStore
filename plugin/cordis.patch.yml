@@ -1,0 +1,22 @@
+# 小鲸鱼工具组的默认挂载配置。
+# 用户 profile 里引用本插件时，条目 id 必须等于 `whale-tools`（设置页命名空间就是它）。
+- id: whale-tools
+  name: dsh-xiaojingyu-tools
+  config:
+    readTools: true
+    loginTools: true
+    writeTools: false
+    dynamicTools: false
+    commentEnabled: false
+    mentionName: ''
+    commentPerDay: 3
+    likePerDay: 30
+    favPerDay: 3
+    dynamicPerDay: 3
+    minGapMs: 2000
+    cooldownMin: 30
+    searchOrder: totalrank
+    coverWidth: 512
+    framesMax: 6
+    subtitleMaxChars: 20000
+    credentialsPath: /root/.dsh/surfcore/bili/credentials.json

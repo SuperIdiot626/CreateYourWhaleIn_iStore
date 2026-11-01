@@ -1,0 +1,32 @@
+{
+  "name": "dsh-xiaojingyu-tools",
+  "version": "0.1.0",
+  "description": "小鲸鱼工具组：给 SurfCore 上的小鲸鱼提供 B站等工具（只提供工具与设置，不主动做事）",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SuperIdiot626/CreateYourWhaleIn_iStore.git",
+    "directory": "plugin"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}
