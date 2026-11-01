@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **B站评论区点赞**：小鲸鱼现在能在评论区给评论点赞 / 取消点赞（`mcp__bili__comment_like`）。
+  走独立 MCP server（`deploy/surfcore/mcp-bili-comment.js`），不碰插件 node_modules；
+  带每日上限 30 次 + 最小间隔 2 秒 + 撞风控自动冷却 30 分钟。发评论仍走原有 `bili_reply`。
+  说明见 [docs/bili-comment.md](docs/bili-comment.md)，部署见
+  [deploy/surfcore/README.md](deploy/surfcore/README.md)。
+
 ### Fixed
 
 - **部署机主机名被 Tailscale MagicDNS 抢走**：同一台机器在局域网和 tailnet 里的名字只差大小写，
