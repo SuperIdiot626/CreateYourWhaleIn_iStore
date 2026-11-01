@@ -452,6 +452,7 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
 
   /** 当前登录态（mid/uname/头像；不返回任何 cookie） */
   async function whoami() {
+    const noCredFile = !hasCred()
     try {
       const json = await getJson(`${API}/x/web-interface/nav`, {
         headers: authHeaders(),
@@ -460,7 +461,8 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
       const code = json?.code
       const d = json?.data || {}
       if (code !== 0) {
-        const hint = codeHint(code) || json?.message || `code=${code}`
+        // -101 = 游客；没凭据文件时别说"cookie 过期"，那会误导排查方向
+        const hint = noCredFile ? '还没有登录凭据（先扫码登录）' : codeHint(code) || json?.message || `code=${code}`
         return { ok: false, loggedIn: false, mid: 0, uname: '', avatarUrl: '', hint }
       }
       const loggedIn = Boolean(d.isLogin)
@@ -471,7 +473,7 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
           mid: 0,
           uname: '',
           avatarUrl: '',
-          hint: hasCred() ? 'cookie 已过期或无效，需要重新扫码登录' : '还没登录（没有凭据文件）',
+          hint: hasCred() ? 'cookie 已过期或无效，需要重新扫码登录' : '还没有登录凭据（先扫码登录）',
         }
       }
       return {
@@ -516,19 +518,38 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
     }
   }
 
-  /** 视频信息（对外形状固定） */
+  /**
+   * 视频信息（对外形状固定）。
+   * ⚠️ 这个也不抛异常 —— 失败时返回 ok:false + 空字段 + hint，
+   *    这样 index.js 不写 try/catch 也不会炸。
+   */
   async function videoInfo(bvid) {
-    const d = await viewRaw(bvid)
-    return {
-      ok: true,
-      aid: Number(d.aid) || 0,
-      cid: Number(d.cid) || Number(d?.pages?.[0]?.cid) || 0,
-      bvid: String(d.bvid || bvid),
-      title: String(d.title ?? ''),
-      pic: httpsUrl(d.pic),
-      duration: Number(d.duration) || 0,
-      owner: { mid: Number(d?.owner?.mid) || 0, name: String(d?.owner?.name ?? '') },
-      desc: String(d.desc ?? ''),
+    try {
+      const d = await viewRaw(bvid)
+      return {
+        ok: true,
+        aid: Number(d.aid) || 0,
+        cid: Number(d.cid) || Number(d?.pages?.[0]?.cid) || 0,
+        bvid: String(d.bvid || bvid),
+        title: String(d.title ?? ''),
+        pic: httpsUrl(d.pic),
+        duration: Number(d.duration) || 0,
+        owner: { mid: Number(d?.owner?.mid) || 0, name: String(d?.owner?.name ?? '') },
+        desc: String(d.desc ?? ''),
+      }
+    } catch (e) {
+      return {
+        ok: false,
+        aid: 0,
+        cid: 0,
+        bvid: String(bvid ?? ''),
+        title: '',
+        pic: '',
+        duration: 0,
+        owner: { mid: 0, name: '' },
+        desc: '',
+        hint: e?.message || String(e),
+      }
     }
   }
 
@@ -536,6 +557,7 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
   async function subtitle(bvid) {
     try {
       const v = await videoInfo(bvid)
+      if (!v.ok) return { ok: false, title: '', lang: '', text: '', lines: [], hint: v.hint }
       const cid = v.cid
       if (!cid) return { ok: false, title: v.title, lang: '', text: '', lines: [], hint: '拿不到 cid（视频可能已下架）' }
 
@@ -623,6 +645,7 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
   async function comments({ bvid, num = 30 } = {}) {
     try {
       const v = await videoInfo(bvid)
+      if (!v.ok) return { ok: false, items: [], hint: v.hint }
       if (!v.aid) return { ok: false, items: [], hint: '拿不到 aid' }
       const ps = Math.max(1, Math.min(50, Math.floor(Number(num) || 30)))
       const data = await apiSigned(
@@ -657,6 +680,7 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
   async function coverBuffer(bvid) {
     try {
       const v = await videoInfo(bvid)
+      if (!v.ok) return { ok: false, buffer: null, mimeType: '', hint: v.hint }
       if (!v.pic) return { ok: false, buffer: null, mimeType: '', hint: '视频没有封面字段' }
       const buf = await getBytes(v.pic, { what: '下载封面' })
       return { ok: true, buffer: buf, mimeType: sniffMime(buf) }
@@ -829,6 +853,15 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
       if (storyMax > 0) covered = Math.min(covered || storyMax, storyMax)
       if (!(covered > 0)) covered = storyMax
 
+      // 提示收集（多来源，最后拼成一句 hint）
+      const notes = []
+      // 实测长视频（直播回放/几小时播客）的故事板只覆盖前 1 小时左右
+      if (duration > 0 && storyMax > 0 && storyMax < duration * 0.95) {
+        notes.push(
+          `故事板只覆盖到 ${Math.round(storyMax)}s（视频全长 ${Math.round(duration)}s，长视频常见），更靠后的时点会取到最后一帧`,
+        )
+      }
+
       // 目标时间点
       let targets
       if (Array.isArray(at) && at.length) {
@@ -879,6 +912,7 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
       const cap = Math.max(1, cols * rows) // 每张拼图装几块
 
       const out = []
+      const usedTiles = [] // 记录每帧用的块下标，用来提示重复
       let lastFail = null
       for (const t of targets) {
         // 找时间上最近的一块
@@ -906,6 +940,7 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
           const outPath = path.join(tmpDir, `frame-${out.length}.jpg`)
           const buf = await cropTile(meta.file, outPath, { tw, th, col, row })
           out.push({ buffer: buf, mimeType: sniffMime(buf) || 'image/jpeg', atMs: Math.round(best.sec * 1000) })
+          usedTiles.push(best.tile)
         } catch (e) {
           lastFail = e
         }
@@ -914,8 +949,12 @@ export function makeBili({ credentialsPath = DEFAULT_CRED_PATH, log = console.lo
       if (!out.length) {
         return { ok: false, frames: [], hint: `一帧都没裁出来${lastFail ? `：${lastFail.message}` : ''}` }
       }
-      const hint = lastFail ? `有 ${targets.length - out.length} 帧失败：${lastFail.message}` : undefined
-      return { ok: true, frames: out, ...(hint ? { hint } : {}) }
+      if (lastFail) notes.push(`有 ${targets.length - out.length} 帧失败：${lastFail.message}`)
+      // 多个目标时点落到同一块拼图（故事板间隔大于目标间距时会出现）
+      if (new Set(usedTiles).size < usedTiles.length) {
+        notes.push(`有 ${usedTiles.length - new Set(usedTiles).size} 帧与前面重复（故事板采样间隔比目标间距大）`)
+      }
+      return { ok: true, frames: out, ...(notes.length ? { hint: notes.join('；') } : {}) }
     } catch (e) {
       return { ok: false, frames: [], hint: e?.message || String(e) }
     } finally {

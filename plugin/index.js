@@ -87,6 +87,8 @@ export function apply(ctx, config) {
     return biliClient
   }
   const limits = makeLimits({ stateFile: path.join(stateDir, 'action-state.json') })
+  // 登录流程里"出码那一跳带出来的 buvid3"先记着，poll 成功时补进凭据（凭据在 Set-Cookie 里，buvid3 有时缺）
+  const loginSeeds = new Map()
 
   const textOutput = {
     schema: { type: 'object', properties: {}, additionalProperties: true },
@@ -211,7 +213,8 @@ export function apply(ctx, config) {
     async execute(args) {
       if (cfg().readTools === false) return disabled('只读工具')
       const r = await bili().subtitle(String(args.bvid ?? ''))
-      const max = Math.max(500, Number(cfg().subtitleMaxChars) || 20000)
+      // 模块内硬上限 20000：配置设更大也没用，这里先夹住，免得设置页给人错觉
+      const max = Math.min(20000, Math.max(500, Number(cfg().subtitleMaxChars) || 20000))
       if (r?.text && r.text.length > max) return { ...r, text: `${r.text.slice(0, max)}\n…（已截断，共 ${r.text.length} 字）` }
       return r
     },
@@ -284,6 +287,7 @@ export function apply(ctx, config) {
     async execute() {
       if (cfg().loginTools === false) return disabled('登录工具')
       const r = await loginStart({ stateDir })
+      if (r?.qrcodeKey) loginSeeds.set(String(r.qrcodeKey), String(r.seedBuvid3 || ''))
       return {
         ok: true,
         key: r.qrcodeKey,
@@ -300,7 +304,9 @@ export function apply(ctx, config) {
     parameters: { key: { type: 'string', description: 'bili_login_start 返回的 key' } },
     async execute(args) {
       if (cfg().loginTools === false) return disabled('登录工具')
-      const r = await loginPoll({ qrcodeKey: String(args.key ?? '') })
+      const key = String(args.key ?? '')
+      const r = await loginPoll({ qrcodeKey: key, seedBuvid3: loginSeeds.get(key) || '' })
+      if (r.state !== 'waiting' && r.state !== 'scanned') loginSeeds.delete(key)
       if (r.state === 'ok' && r.credential) {
         bili().saveCred(r.credential)
         return { ok: true, state: 'ok', saved: cfg().credentialsPath, hint: '登录成功，凭证已保存' }

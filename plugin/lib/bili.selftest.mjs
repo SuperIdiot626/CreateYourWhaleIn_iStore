@@ -346,7 +346,95 @@ async function main() {
     line()
   }
 
+  await mockTests()
+
   return finish()
+}
+
+/**
+ * 不打网络的确定性测试：WBI 签名过期重试、412 风控报错。
+ * 做法是把 globalThis.fetch 换掉（模块里用的是全局 fetch，运行期解析）。
+ */
+async function mockTests() {
+  const realFetch = globalThis.fetch
+
+  console.log('[10] WBI 签名过期 → 刷新 keys 重试一次（mock fetch，不联网）')
+  let navCount = 0
+  let searchCount = 0
+  const rids = []
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes('/x/web-interface/nav')) {
+      navCount++
+      // 每次 nav 给不同的 key，这样才能验证"确实换了新 key 重签"
+      const k = String(navCount).repeat(32)
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          data: { isLogin: true, mid: 1, uname: 'x', face: '', wbi_img: { img_url: `https://x/a/${k}.png`, sub_url: `https://x/b/${k}.png` } },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    if (u.includes('/wbi/search/type')) {
+      searchCount++
+      rids.push(/w_rid=([0-9a-f]+)/.exec(u)?.[1] || '')
+      // 第一次故意回 -403（签名过期典型症状），第二次成功
+      if (searchCount === 1) {
+        return new Response(JSON.stringify({ code: -403, message: '访问权限不足' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: '0',
+          data: { result: [{ bvid: 'BV1Rbxg6WER5', title: 'x', author: 'a', play: 1, duration: '01:02', pubdate: 1, description: 'd' }] },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  try {
+    const b = makeBili({ credentialsPath: CRED_PATH, log: () => {} })
+    const r = await b.search({ keyword: 'x', num: 1 })
+    const okNav = navCount === 2 // 初始 1 次 + 重试前刷新 1 次
+    const okRedo = searchCount === 2
+    const okResign = rids.length === 2 && rids[0] && rids[1] && rids[0] !== rids[1]
+    console.log(`    结果 ok=${r.ok} 条数=${r.items?.length}`)
+    console.log(`    nav 次数=${navCount}（应为 2，说明刷新过 keys）`)
+    console.log(`    search 次数=${searchCount}（应为 2，说明重试了一次）`)
+    console.log(`    w_rid 换了=${okResign}（说明用新 key 重签）`)
+    console.log(`    时长归一 "01:02" → ${r.items?.[0]?.duration}s（应为 62）`)
+    const pass = r.ok && okNav && okRedo && okResign && r.items[0].duration === 62
+    console.log(`    ${pass ? C.ok('WBI 重试 OK') : C.bad('WBI 重试不符合预期')}`)
+    results.push({ name: 'WBI 重试(mock)', ok: pass, ms: 0, detail: '' })
+  } catch (e) {
+    console.log(`    ${C.bad('mock 测试抛异常：' + (e?.message || e))}`)
+    results.push({ name: 'WBI 重试(mock)', ok: false, ms: 0, detail: e?.message || '' })
+  }
+  line()
+
+  console.log('[11] HTTP 412 → 风控报错要能看懂（mock fetch）')
+  globalThis.fetch = async () =>
+    new Response('<html>blocked</html>', { status: 412, statusText: 'Precondition Failed' })
+  try {
+    const b = makeBili({ credentialsPath: CRED_PATH, log: () => {} })
+    const r = await b.search({ keyword: 'x', num: 1 })
+    console.log(`    ok=${r.ok}（应为 false）`)
+    console.log(`    hint=${r.hint}`)
+    const good = r.ok === false && /412/.test(r.hint || '') && /风控/.test(r.hint || '')
+    console.log(`    ${good ? C.ok('412 报错可读') : C.bad('412 报错不可读')}`)
+    results.push({ name: '412 风控报错(mock)', ok: good, ms: 0, detail: '' })
+  } catch (e) {
+    console.log(`    ${C.bad('mock 测试抛异常：' + (e?.message || e))}`)
+    results.push({ name: '412 风控报错(mock)', ok: false, ms: 0, detail: e?.message || '' })
+  } finally {
+    globalThis.fetch = realFetch
+  }
+  line()
 }
 
 function finish() {

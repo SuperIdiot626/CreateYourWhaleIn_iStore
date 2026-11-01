@@ -33,7 +33,7 @@
 | 工具 | 说明 |
 |---|---|
 | `bili_login_start` | 出二维码 PNG（存 `$DSH_HOME/whale-tools/`），返回 key |
-| `bili_login_poll` | waiting / scanned / ok / expired，成功即写凭证 |
+| `bili_login_poll` | waiting / scanned / ok / expired；成功时从 `Set-Cookie` 取凭据（`data.url` 里没有 SESSDATA，这是参考实现踩过的坑），buvid3 缺时补一次 nav |
 | `bili_status` | 登录态、凭据时间、今日写操作计数、工具组开关 |
 
 ### 写操作（`writeTools` / `dynamicTools`，**默认关**）
@@ -50,7 +50,7 @@ P2 迁移中：`bili_reply`、`bili_video_like`、`bili_video_fav`、`bili_comme
 |---|---|
 | 工具组 | `readTools` / `loginTools` / `writeTools` / `dynamicTools` |
 | 写闸门 | `commentEnabled`、`mentionName`、`commentPerDay=3`、`likePerDay=30`、`favPerDay=3`、`dynamicPerDay=3`、`minGapMs=2000`、`cooldownMin=30` |
-| 只读偏好 | `searchOrder`、`coverWidth=512`、`framesMax=6`、`subtitleMaxChars=20000` |
+| 只读偏好 | `searchOrder`、`coverWidth=512`、`framesMax=6`、`subtitleMaxChars=20000`（模块内硬上限 20000，设更大无效） |
 | 凭据 | `credentialsPath`（默认 `/root/.dsh/surfcore/bili/credentials.json`） |
 
 ## 挂载
