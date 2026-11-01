@@ -148,3 +148,66 @@ for (const n of ['mcp__bili__video_like', 'mcp__bili__video_fav', 'mcp__bili__co
 | `dsh/agent-presets/qq-chat-v2/agent.cordis.yml` 提示词 | **会** |
 
 升级后按上面三步重贴一遍，再跑验证。
+
+---
+
+# 附：SurfCore 控制台的 Host 白名单（2026-11-01 修）
+
+## 症状
+
+在 DSH 的 SurfCore 面板里读配置，报 **「读取 token 额度失败：只接受本机回环访问」**。
+
+## 根因
+
+不是鉴权问题，是 `src/bridge.js` 的 **Host 头白名单**太窄。原来按「主机名:端口」精确匹配：
+
+```js
+const allowedHosts = [`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`,
+  `192.168.31.200:${boundPort}`, `istoreos.tail9fd4a6.ts.net:3101`, `istoreos:3101`];
+```
+
+实测这些会 403：`100.112.160.109:3101`、`192.168.31.200:3101`、`istoreos.tail9fd4a6.ts.net`（不带端口）。
+报错文案只显示尾巴「只接受本机回环访问」，很容易误判成 token/鉴权问题（其实前面还有一句
+「Host 头不被允许（<实际 Host>）」，界面上被截掉了）。
+
+## 修法
+
+改成**按主机名判断、不卡端口**，放过本机自己的名字与所有网卡地址；外部域名仍拒（DNS rebinding 防护不破）：
+
+```js
+const hostNameOnly = String(hostHeader).replace(/:\d+$/, '').replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+const allowedHostNames = new Set(['127.0.0.1', 'localhost', '::1', String(os.hostname() || '').toLowerCase(),
+  'istoreos', 'istoreos.tail9fd4a6.ts.net']);
+for (const list of Object.values(os.networkInterfaces()))
+  for (const addr of list || []) if (addr?.address) allowedHostNames.add(String(addr.address).toLowerCase());
+if (!allowedHostNames.has(hostNameOnly)) { /* 403 */ }
+```
+
+补丁脚本：`DSH/scripts/patch-bridge-host-whitelist.py`（仓库外，属本机运维材料）
+
+## 验证（在容器里跑）
+
+```
+127.0.0.1:3100                 -> 200
+istoreos.tail9fd4a6.ts.net:3101 -> 200
+100.112.160.109:3101           -> 200   ← 修之前 403
+192.168.31.200:3101            -> 200   ← 修之前 403
+istoreos.tail9fd4a6.ts.net     -> 200   ← 修之前 403（不带端口）
+evil.example.com:3100          -> 403   ← 仍然拒（防护有效）
+```
+
+## 重启桥接的注意事项
+
+`bridge.js` 是 DSH 插件拉起的子进程，**改完必须重启它**。注意：
+
+- 容器里**没有 `pkill`**，要用 `kill -9 <pid>`
+- 重启时插件和宿主机 cron 的 `qq-watchdog.py`（每 2 分钟）会**各拉一次**，
+  容易留下多个进程抢 3100 端口 —— 旧的占着端口、新的抢不到，于是「改了代码却没生效」。
+  实测出现过 3 个并存；**必须确认只剩一个、且启动时间晚于文件修改时间**。
+- 判断方法：`ls -l --time-style=+%H:%M:%S src/bridge.js` 对比进程启动时间。
+
+## ⚠️ 另一个观察：控制台现在绑 0.0.0.0
+
+上游 `bridge.js` 是 `server.listen(port, '0.0.0.0')`；本机曾经打过补丁改成只绑 `127.0.0.1`
+（靠 tailscale serve 转发）。今天重启后变回 `0.0.0.0` —— 也就是**局域网内能直接访问 3100**。
+仍有 token + Host 白名单两道，但比原来松。要恢复回环硬化，把它改回 `'127.0.0.1'` 即可。
