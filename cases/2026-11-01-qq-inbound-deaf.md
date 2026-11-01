@@ -146,6 +146,35 @@ NapCat HTTP 可达  AND  桥接 /api/status.snowluma 满足任一：
 - 手动重建整链路 1 秒完成：close→自愈→reconnect→`connected:true`、`lastPacketAgoMs` 恢复为秒级。
 - 换文件重启期间入站空窗只有几秒（新进程 00:59:59 起来），锁与 3100 端口交接正常。
 
+### 已上线（3）：第二层「对账」（`deploy/patches/0003-bridge-inbound-reconcile.patch`）
+
+上午复盘时发现 0002 有个真盲点：停滞判据看 `lastPacketAt`，而 **NapCat 每 30 秒无条件发心跳**，
+心跳一直刷新它 —— 所以「WS 连着、心跳在跑、但网关 hook 收不到 QQ 数据（`good=false`）」
+这种**连着也不通**，0002 永远等不到。补一层对账：
+
+| # | 改动 |
+|---|---|
+| 1 | `snowlumaHealth.lastBusinessAt`：只有 `message/notice/request` 算业务事件（心跳不算）；`/api/status` 暴露 `lastBusinessAgoMs` |
+| 2 | 连着 + 业务事件静默 >10 分钟 → `runHistoryCatchUp(force)` 对账，漏的消息去重后补进未读并正常唤醒（既能发现也能恢复） |
+| 3 | `good=false` 不再指望重建 WS（治不了），改为立即对账补历史 |
+| 4 | 修掉 `retry(retry(retry(...)))` 日志嵌套 |
+| 5 | 运维钩子 `touch state/force-inbound-reconcile`（30 秒内响应） |
+
+验证（10:35 上线）：
+
+```
+10:33:20 [对账] 从未收到业务事件（心跳仍在），核对网关历史消息…
+10:33:20 [对账] 无漏消息，入站链路正常
+10:35:04 🧪 收到手动对账信号 → [对账] … → 无漏消息，入站链路正常
+/api/status.snowluma: lastBusinessAgoMs 已出现
+```
+
+> 自愈的边界要说清：**账号被踢、需要扫码这种，任何自愈都救不了，只能人扫码。**
+> 11-01 01:33 被踢 → 到 10:27 扫上码为止**离线 9 小时**（NapCat 干等扫码，`3000/3001` 全程没开）。
+> 桥接那边一直在正确地每 2.5 分钟重试并记录；微信通知也发过「掉线（**无码**）」。
+> 真正缺的是「自动抓到二维码并推到主人手机上」——`qq-notify` 这次报的是"无码"，
+> 抓码脚本在容器里看不到宿主机 overlay 路径，这是下一个要修的点。
+
 ### 还值得做的
 
 | 优先级 | 做什么 |

@@ -1,0 +1,151 @@
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -3742,6 +3742,7 @@
+   const snowlumaHealth = {
+     lastPacketAt: 0,      // 最近一个来自 SnowLuma 的事件包（含 meta/心跳）
+     lastPacketKind: '',
++    lastBusinessAt: 0,    // 最近一个**业务**事件（message/notice/request）—— 心跳不算
+     accountOnline: null,  // bot_status 的 online/offline（需要较新的 SnowLuma 运行时）
+     good: null,           // 接收链路健康度：来自心跳 status.good / get_status.good
+     goodSource: '',       // 'heartbeat' | 'get_status' —— 便于诊断"这条判断从哪来"
+@@ -3751,10 +3752,20 @@
+     reason: '',
+   };
+ 
+-  /** 记录一次"上游还活着"的证据。任何来自 SnowLuma 的事件包都算（含心跳）。 */
++  /**
++   * 记录一次"上游还活着"的证据。任何来自 SnowLuma 的事件包都算（含心跳）。
++   *
++   * ⚠️ 2026-11-01：**心跳不能代表"消息能进来"**。NapCat 每 30 秒无条件发一次
++   * `meta_event/heartbeat`，所以只要 WS 活着 `lastPacketAt` 就一直被刷新 ——
++   * 于是"连着但不通"（它的 hook 收不到 QQ 数据、good=false）这种故障，
++   * 用 `lastPacketAt` 是**判不出来**的。这里单独记业务事件，供对账用。
++   */
+   function noteUpstreamPacket(kind) {
+     snowlumaHealth.lastPacketAt = Date.now();
+     snowlumaHealth.lastPacketKind = String(kind ?? '');
++    if (/^(message|notice|request)(\/|$)/.test(snowlumaHealth.lastPacketKind)) {
++      snowlumaHealth.lastBusinessAt = Date.now();
++    }
+   }
+ 
+   /** 记下一次接收链路健康度。@param good - boolean；非布尔值忽略。 */
+@@ -3820,6 +3831,9 @@
+       goodError: snowlumaHealth.goodError || null,
+       lastPacketAgoMs: agoMs,
+       lastPacketKind: snowlumaHealth.lastPacketKind || null,
++      // 心跳每 30 秒一次，光看 lastPacketAgoMs 发现不了"连着但不通"；这个才是真正的业务信号。
++      lastBusinessAgoMs: snowlumaHealth.lastBusinessAt ? now - snowlumaHealth.lastBusinessAt : null,
++      lastBusinessKind: snowlumaHealth.lastBusinessAt ? snowlumaHealth.lastPacketKind || null : null,
+       silent,
+       degraded: confirmed || silent,
+       hint,
+@@ -3835,6 +3849,13 @@
+       log(`⚠️ SnowLuma 上游不健康：${snap.hint}`);
+       log('   这不是桥接的问题：桥接没有任何原生/注入面，也不控制 SnowLuma 或 QQ。');
+       log('   排查：SnowLuma 的 logs/snowluma-*.log 里搜 [Hook]（看是否有 "receive path stale" 或 "process enumeration timed out"）。');
++      if (snowlumaHealth.good === false) {
++        // 2026-11-01：good=false 说明是**网关收不到 QQ 数据**，重建 WS 治不了它
++        //（WS 本来就通着）。真正有用的是拿网关的历史接口对账，把漏掉的消息补回来。
++        log('   网关自报接收链路异常：先对账补历史，把这段窗口里漏掉的消息捞回来（重建 WS 没用）。');
++        void runHistoryCatchUp('good-false', { force: true })
++          .catch((error) => log(`[history] good=false 对账异常：${error?.message ?? error}`));
++      }
+     } else if (!snap.degraded && snowlumaHealth.degraded) {
+       snowlumaHealth.degraded = false;
+       snowlumaHealth.reason = '';
+@@ -3886,8 +3907,28 @@
+     // 2026-11-01：和告警同频，但这个是**会动手**的那个 —— 入站停滞就重建 WS 客户端。
+     setInterval(() => {
+       try { checkInboundStall(); } catch (error) { log(`入站停滞看门狗出错（已兜住）：${error?.message ?? error}`); }
++      // 手动对账信号也在这个 30 秒周期里认（否则要等最长 10 分钟才生效）
++      try {
++        const f = path.join(STATE_DIR, 'force-inbound-reconcile');
++        if (fs.existsSync(f)) {
++          fs.unlinkSync(f);
++          log('🧪 收到手动对账信号（state/force-inbound-reconcile）');
++          lastReconcileAt = 0;
++          void reconcileInbound('debug');
++        }
++      } catch {}
+     }, 30_000);
++    // 2026-11-01（第二层）：对账。心跳会被上面那层判据"喂饱"，连着但不通只能靠这个兜。
++    // 启动 90 秒后先跑一次（顺带验证链路），之后每 10 分钟一次；条件不满足就不发请求。
++    const reconcileTimer = setTimeout(() => {
++      try { checkInboundReconcile(); } catch (error) { log(`入站对账出错（已兜住）：${error?.message ?? error}`); }
++    }, 90_000);
++    reconcileTimer.unref?.();
++    setInterval(() => {
++      try { checkInboundReconcile(); } catch (error) { log(`入站对账出错（已兜住）：${error?.message ?? error}`); }
++    }, 10 * 60_000);
+     log(`入站停滞看门狗已启动（${Math.round(INBOUND_STALL_MS / 1000)} 秒收不到事件包即判停滞，连续两个周期才重建）`);
++    log(`入站对账已启动（业务事件静默 ${Math.round(INBOUND_RECONCILE_QUIET_MS / 60_000)} 分钟就拉一次网关历史核对）`);
+   }
+ 
+   // ── 本地控制台（独立 Web 面板，不依赖 DSH WebUI） ───────────────────────────
+@@ -15207,7 +15248,8 @@
+       tokenHealRetryTimer = null;
+       if (snowlumaHealth.connected) return;
+       tokenHealAt = 0; // 绕过节流（定时器本身就是节流）
+-      void healTokenIfStale(`retry(${String(reason).slice(0, 120)})`);
++      // 别把上一轮的 reason 再套一层（否则会变成 retry(retry(retry(...)))) 越套越长）
++      void healTokenIfStale('retry');
+     }, 60_000);
+     tokenHealRetryTimer.unref?.();
+   }
+@@ -15319,6 +15361,55 @@
+     rebuildSnowlumaClient(connected ? '入站心跳静默' : 'WS 未连接');
+   }
+ 
++  // ── 入站对账（2026-11-01 第二层） ──────────────────────────────────────────
++  // 为什么还要这一层：上面那个停滞判据看的是 `lastPacketAt`，而心跳每 30 秒刷新它。
++  // 于是"WS 连着、心跳照跑、但 NapCat 的 hook 收不到 QQ 数据（good=false）"这种故障，
++  // 停滞判据**永远等不到**。这类故障唯一能兜住的办法是拿网关自己的历史接口对账：
++  //   连着 + 一段时间没有任何业务事件 → 拉一次历史，把漏掉的消息补进来。
++  // 对账本身就是恢复动作（不是只报警）：runHistoryCatchUp 按 messageId + 水位去重，
++  // 补进来的消息会正常唤醒模型，所以她不会"漏一整段对话"。
++  const INBOUND_RECONCILE_QUIET_MS = Math.max(5 * 60_000, Number(cfg.snowluma?.reconcileQuietMs) || 10 * 60_000);
++  const INBOUND_RECONCILE_MIN_GAP_MS = 5 * 60_000;
++  let lastReconcileAt = 0;
++
++  async function reconcileInbound(reason) {
++    const now = Date.now();
++    if (!snowlumaHealth.connected) return;
++    if (now - lastReconcileAt < INBOUND_RECONCILE_MIN_GAP_MS) return;
++    const bizAgo = snowlumaHealth.lastBusinessAt ? now - snowlumaHealth.lastBusinessAt : Infinity;
++    const quiet = Number.isFinite(bizAgo) ? `已 ${Math.round(bizAgo / 60000)} 分钟没有业务事件` : '从未收到业务事件';
++    if (bizAgo < INBOUND_RECONCILE_QUIET_MS && reason !== 'debug') return;
++    lastReconcileAt = now;
++    log(`[对账] ${quiet}（心跳仍在），核对网关历史消息…`);
++    try {
++      const r = await runHistoryCatchUp(`reconcile:${reason}`, { force: true });
++      if (!r || r.ok === false) { log('[对账] 跳过（模式/会话条件不满足）'); return; }
++      if (r.skipped) { log(`[对账] 跳过（${r.skipped}）`); return; }
++      const missed = Number(r.incoming) || 0;
++      if (missed > 0) log(`[对账] ⚠️ 发现并补回 ${missed} 条漏掉的群友消息（入站确实不通，已恢复）`);
++      else if (Number(r.total) > 0) log(`[对账] 无漏消息（补回 ${r.total} 条自己的旧消息，仅补上下文）`);
++      else log('[对账] 无漏消息，入站链路正常');
++    } catch (error) {
++      log(`[对账] 异常：${error?.message ?? error}`);
++    }
++  }
++
++  /** 每 10 分钟一次；只在"连着但长时间没有业务事件"时才真的去拉历史。 */
++  function checkInboundReconcile() {
++    // 运维用：touch state/force-inbound-reconcile 立即对账一次
++    try {
++      const forceFile = path.join(STATE_DIR, 'force-inbound-reconcile');
++      if (fs.existsSync(forceFile)) {
++        fs.unlinkSync(forceFile);
++        log('🧪 收到手动对账信号（state/force-inbound-reconcile）');
++        lastReconcileAt = 0;
++        void reconcileInbound('debug');
++        return;
++      }
++    } catch {}
++    void reconcileInbound('periodic');
++  }
++
+   // SnowLuma 尚未就绪时不阻塞桥接启动：SDK 自带后台重连，DSH 侧照常连接。
+   bot.connect().catch((error) => {
+     // 说明为什么"第一次连不上"在这里几乎是**必然**的，避免用户把它当成故障：

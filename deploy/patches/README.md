@@ -32,6 +32,28 @@ OneBot send_private_msg 失败: 文件处理失败: 识别URL失败, uri= /root/
 附带一个运维钩子：`touch state/force-inbound-rebuild` 可以在 30 秒内手动触发一次重建，
 用来验证自愈链路（不需要等真的出事）。
 
+## 0003-bridge-inbound-reconcile.patch
+
+2026-11-01 上午的第二层补丁。起因：0002 的停滞判据看的是 `lastPacketAt`，
+而 NapCat **每 30 秒无条件发一次心跳**，心跳会一直刷新它 —— 于是
+「WS 连着、心跳在跑、但 NapCat 的 hook 收不到 QQ 数据（`good=false`）」这种
+**连着也不通**的故障，0002 判不出来。这一层改用网关自己的历史接口对账：
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `noteUpstreamPacket()` + `snowlumaHealth` | 新增 `lastBusinessAt`：只有 `message / notice / request` 算业务事件，心跳不算；`/api/status.snowluma` 多暴露 `lastBusinessAgoMs` / `lastBusinessKind` |
+| 2 | `startSnowlumaWatch()` | 新增**入站对账**：连着 + 业务事件静默超过 10 分钟 → `runHistoryCatchUp(force)` 拉一次网关历史，漏掉的消息按 messageId + 水位去重后补进未读并正常唤醒（不是只报警，是直接恢复） |
+| 3 | `reportSnowlumaHealth()` | 网关自报 `good=false` 时不再指望重建 WS（治不了），改为立即对账补历史并打一行说明 |
+| 4 | `scheduleTokenHealRetry()` | 修日志嵌套：原来是 `retry(retry(retry(...)))` 越套越长 |
+| 5 | 运维钩子 | `touch state/force-inbound-reconcile` 30 秒内触发一次手动对账 |
+
+实测（上线当分钟）：启动 90 秒后首跑 `[对账] 从未收到业务事件（心跳仍在），核对网关历史消息… → 无漏消息，入站链路正常`；
+手动钩子 30 秒内响应；`/api/status` 已出现 `lastBusinessAgoMs`。
+
+> 仍然的边界：账号被踢、需要扫码这种，任何自愈都救不了，只能人扫码。
+> 11-01 01:33 被踢 → 09 小时离线就是这个（NapCat 干等扫码，`3000`/`3001` 全程没开，
+> 桥接一直在正确地重试，但没码就没戏）。
+
 ## 怎么打
 
 ```sh
@@ -41,12 +63,15 @@ patch -p1 --dry-run < .../0001-surfcore-record-base64.patch   # 先试
 patch -p1 < .../0001-surfcore-record-base64.patch
 # 0002 是 2026-11-01 的入站自愈补丁；基线是「打完 0001（和 replay 那版本地改动）之后」的 bridge.js
 patch -p1 < .../0002-bridge-inbound-selfheal.patch
+# 0003 的第二层对账补丁，基线是「打完 0002 之后」的 bridge.js
+patch -p1 < .../0003-bridge-inbound-reconcile.patch
 node --check src/bridge.js
 # 重启桥接
 ```
 
 > ⚠️ 0002 的 `diff` 基线是**这台机器当时线上那份** `bridge.js`（含 0001 与 replay 本地改动），
-> 不是上游原版。换机器/升级 SurfCore 后先看 `patch --dry-run` 输出，冲突就按上面的表格手改。
+> 0003 的基线是打完 0002 之后的那份。都不是上游原版。换机器/升级 SurfCore 后先看
+> `patch --dry-run` 输出，冲突就按上面的表格手改。
 > 容器里没有 `patch` 命令，可以在宿主机或本地打完再 `docker cp` 进去。
 
 ## 注意

@@ -11,6 +11,28 @@
   地址，而 Samba 只绑 LAN）。修法：LAN 名与 tailnet 全名都在 hosts 里固化，并关掉该机的
   MagicDNS。根因链与验证见 [cases/2026-10-31-istoreos-smb-access.md](cases/2026-10-31-istoreos-smb-access.md)。
 
+## [0.2.3] - 2026-11-01
+
+补上第一层自愈的盲点：心跳会把「停滞」判据喂饱，于是「连着也不通」发现不了。
+
+### Added
+
+- **桥接补丁 `deploy/patches/0003-bridge-inbound-reconcile.patch`**：
+  1. `snowlumaHealth.lastBusinessAt`：只有 `message/notice/request` 算业务事件（心跳不算），
+     `/api/status.snowluma` 暴露 `lastBusinessAgoMs`；
+  2. **入站对账**：连着但业务事件静默 >10 分钟 → 拉一次网关历史，漏掉的消息按
+     messageId + 水位去重后补进未读并正常唤醒（既能发现也能恢复，不是只报警）；
+  3. `good=false` 时改为立即对账补历史（重建 WS 治不了 hook 坏）；
+  4. 修掉 `retry(retry(retry(...)))` 日志嵌套；
+  5. 运维钩子 `touch state/force-inbound-reconcile`，30 秒内响应。
+- 实测：启动 90 秒首跑 `[对账] … 无漏消息，入站链路正常`；手动钩子 30 秒内响应。
+
+### Notes
+
+- **自愈的边界**：账号被踢/需要扫码只能人扫码。11-01 01:33 被踢 → 到 10:27 扫码为止离线 9 小时，
+  期间桥接每 2.5 分钟正确重试、微信通知发过「掉线（无码）」，但抓码链路没把二维码推出来，
+  `qq-notify` 的"无码"是下一个要修的点。
+
 ## [0.2.2] - 2026-11-01
 
 让桥接自己活过来：入站静默时**进程内**重建 WebSocket，不用等整进程重启。
