@@ -1,0 +1,74 @@
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -8958,6 +8958,7 @@
+     return Number.isFinite(n) && n > 0 ? Math.min(8, Math.max(1, Math.round(n))) : 5;
+   })();
+   const MAX_MEDIA_BYTES = maxMediaBytesLimit; // 单条消息图片总字节上限
++  const MAX_MEDIA_MB = Math.max(1, Math.round(MAX_MEDIA_BYTES / (1024 * 1024)));
+   const MAX_MEDIA_PIXELS = (() => {
+     const n = Number(cfg.socialV2?.media?.maxPixels);
+     return Number.isFinite(n) && n > 0 ? Math.min(64_000_000, Math.max(1_000_000, Math.round(n))) : 64_000_000;
+@@ -9027,6 +9028,9 @@
+     const isSticker = media.kind === 'sticker' || !!emojiId || String(media.subType || '') === '1';
+     const label = isSticker ? '表情' : '图片';
+     const failures = [];
++    // 2026-11-01：超过大小上限是"能说清楚"的失败——单独标出来，让 agent 能告诉主人
++    // 「这张图太大，我看不了」，而不是含糊的"获取失败"。
++    let tooLarge = false;
+     const urls = [];
+     const pushUrl = (raw) => {
+       const s = String(raw ?? '').trim();
+@@ -9044,7 +9048,9 @@
+           if (accepted) return { ...accepted, mimeType: accepted.mimeType || mimeFromUrl(url) };
+           failures.push(`${url} 不是有效图片`);
+         } catch (error) {
+-          failures.push(`${url}: ${error?.message ?? error}`);
++          const msg = String(error?.message ?? error);
++          if (/大小限制|too large|exceed/i.test(msg)) tooLarge = true;
++          failures.push(`${url}: ${msg}`);
+         }
+       }
+       return null;
+@@ -9063,6 +9069,7 @@
+             const accepted = acceptImageBuffer(Buffer.from(base64, 'base64'), 'get_image 返回的图片');
+             if (accepted) return accepted;
+           } else {
++            tooLarge = true;
+             log(`get_image 返回的图片 base64 超限，已跳过（${Math.round(base64.length * 3 / 4 / 1024)}KB）`);
+           }
+         }
+@@ -9078,6 +9085,7 @@
+         if (typeof obj.file === 'string' && !obj.file.startsWith('base64://') && fs.existsSync(obj.file) && isSafeLocalMediaPath(obj.file)) {
+           const stat = fs.statSync(obj.file);
+           if (stat.size > MAX_MEDIA_BYTES) {
++            tooLarge = true;
+             log(`本地图片文件超限，已跳过（${Math.round(stat.size / 1024)}KB）`);
+           } else {
+             const accepted = acceptImageBuffer(fs.readFileSync(obj.file), '本地图片');
+@@ -9097,7 +9105,7 @@
+     if (failures.length) {
+       log(`[media] ${label}获取失败（${failures.length} 次尝试）：${failures.slice(0, 3).join(' | ')}`);
+     }
+-    return null;
++    return tooLarge ? { tooLarge: true } : null;
+   }
+ 
+   async function fetchFaceMedia(media) {
+@@ -9163,6 +9171,8 @@
+           totalBytes += img.buffer.length;
+           parts.push({ type: 'text', text: label });
+           parts.push({ type: 'image', mediaType: img.mimeType || 'image/jpeg', data: img.buffer.toString('base64'), name: `qq-${sticker ? 'sticker' : 'image'}-${index}.${(img.mimeType || 'image/jpeg').split('/')[1]}` });
++        } else if (img?.tooLarge) {
++          parts.push({ type: 'text', text: `${label}（超过 ${MAX_MEDIA_MB}MB 大小上限，看不了）` });
+         } else {
+           parts.push({ type: 'text', text: `${label}（获取失败）` });
+         }
+@@ -9226,6 +9236,8 @@
+             data: img.buffer.toString('base64'),
+             text: ''
+           });
++        } else if (img?.tooLarge) {
++          out.push({ ...base, text: `（${noun}超过 ${MAX_MEDIA_MB}MB 大小上限，看不了）` });
+         } else {
+           out.push({ ...base, text: `（${noun}获取失败）` });
+         }

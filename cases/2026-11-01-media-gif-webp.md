@@ -1,5 +1,9 @@
 # 2026-11-01 QQ 动图（GIF/WebP）取不到、也「动不了」
 
+> **最终决定（当天）**：不为聊天场景做图像处理。撤回「放宽上限 + 抽帧归一化」那版，
+> 只保留一条改进：**超过大小上限时明确告诉她"这张太大我看不了"**。
+> 试过的那版留在下面当记录，避免以后有人再走一遍。
+
 ## 现象
 
 - 主人在 QQ 里发了两张动图（表情包），她只看到第一张（还是静止的），第二张直接「图片获取失败」；
@@ -31,43 +35,51 @@ bridge.log 里有直接证据：
 一张 8MB 动图 → base64 约 10.6MB 字符串，DSH 上传和上下文都吃不消；
 而且只有第一帧有意义——花大价钱传了一堆用不上的帧。
 
+## 试过的方案（已撤回）
+
+当天先做了一版「归一化」：8MB → 24MB 取回来，用 ffmpeg 把动图等距抽 3 帧、缩成
+长边 960 的小 JPEG，再当多张图喂给模型。技术上跑通了（852KB GIF → 3 帧 × 45KB，
+单测通过，桥接重启后运行正常）。
+
+但主人看过之后判断：**聊天场景不值得为图片做这套处理**——偶发的、看不了就看不了，
+报清楚原因比硬塞进去更有用。于是当天撤回：
+
+- 删除 `src/media-normalize.js`；
+- `socialV2.media.maxBytes` 回到 8MB（bridge 侧 clamp 上限保持 20MB）；
+- 撤回 0004 补丁。
+
+## 保留的改进（0005）
+
+**把「看不见」的原因说清楚**。原来只写 `[图片1]（获取失败）`，她只能含糊地告诉主人"取不到"；
+现在 `fetchOneBotImage()` 识别"超过大小限制"这一类失败并返回 `{ tooLarge: true }`，
+两个消费方翻译成：
+
+```
+[图片1（超过 8MB 大小上限，看不了）]
+```
+
+她就可以直接跟主人说"这张太大我看不了，发小一点"。大小上限按实际配置动态显示。
+
 ## 影响面
 
-- 只影响入站媒体（图片/表情/动图），不影响文字、语音、B站链路。
-- 改 `src/bridge.js`（3 处）+ 新增 `src/media-normalize.js` + `config.json` 的 `socialV2.media.maxBytes`。
-- 不进模型的数据量下降：8MB 动图 → 3 帧 × 45KB ≈ 135KB。
-
-## 修法
-
-1. **放宽取图上限**：`maxBytes` 8MB → 24MB（bridge 侧 clamp 上限 20MB → 32MB）。
-   取得到之后立刻归一化，所以不会把大图塞进上下文。
-2. **新增 `src/media-normalize.js`**（纯函数、不联网、可单测）：
-   - `ffprobe` 判断是不是动图（`format_name` 含 gif/webp 且帧数>1 或时长>0.3s）；
-   - 动图：`ffmpeg` 等距抽 ≤3 帧；
-   - 静态图：缩一张；
-   - 统一小 JPEG：长边 ≤960、单帧 ≤900KB（超了再缩一档）。
-3. **`fetchOneBotImage()`** 拿到原始字节后先归一化，返回 `{ frames, animated, note }`；
-   归一化失败退回原始字节（行为与旧版一致，不会因为新模块挂掉就取不到图）。
-4. **两个消费方展开多帧**：`resolveMediaList()`（拼给模型的 message parts）与
-   `fetchMediaData()`（`qq_get_message_images` 工具返回）都按帧推，并带上
-   `[动图，已抽 3 帧，按顺序看]` 的说明。
-5. **收藏表情那条路不变**：`collectStickerV2` 仍然用原始字节（不然收藏下来的动图会变成静图）。
+- 只影响入站媒体（图片/表情/动图）的**提示文案**；不改变取图逻辑、不改配置。
+- 改动：`src/bridge.js` 一处识别 + 两处提示（补丁 `0005-media-oversize-message.patch`）。
 
 ## 验证
 
 | 项 | 结果 |
 |---|---|
-| 模块单测（852KB 动图 GIF） | `frames=3 animated=true note="[动图，已抽 3 帧，按顺序看]"`，每帧 ~45KB |
-| 模块单测（1920×1440 静图 JPEG） | `frames=1 animated=false`，36KB（长边缩到 960） |
-| 容器内语法检查 | `node --check src/bridge.js`、`src/media-normalize.js` 均通过 |
-| 上线 | bridge pid 979，`media.maxBytes=25165824`，启动日志正常、入站对账/看门狗都在 |
-| 端到端 | ⏳ 待主人重发那张 GIF 后看 `bridge.log` 是否出现抽帧日志、以及她能不能描述"在动" |
+| 撤回是否干净 | 容器里 `src/media-normalize.js` 已删、`media.maxBytes=8388608`、bridge 重启（pid 1171）正常 |
+| 桥接状态 | `connected/accountOnline/good` 全 true，mode=reserved2，补历史正常 |
+| 超限提示 | 代码路径已就位（`tooLarge` → `（超过 8MB 大小上限，看不了）`）；真实 >8MB 表情要等下一次触发才能看到实际文案 |
+
+> 撤回过程中有一次部署脚本写错（在容器里调 `docker`），桥接空转了约 2 分钟
+> （11:25→11:27），随后由脚本重新拉起；期间的入站消息见 `qq-alerts.log`。
 
 ## 回滚与残余
 
-- 备份：容器内 `/root/backups/bridge.js.bak-before-media-20261101-112345`、
-  `config.json.bak-before-media-20261101-112345`；补丁 `deploy/patches/0004-media-normalize.patch`。
-- 残余 1：SILK/QQ 侧的大文件（>24MB 的真视频表情）仍然取不到——那是另一个量级，不建议硬解。
-- 残余 2：市场表情 CDN `raw300.gif` 404 是 QQ 侧的，换不来；现在靠 `media.url` 直链（已能取到）。
-- 残余 3：抽帧是**等距**的（第1/中/末附近的 3 帧），非常短的循环动画可能看起来差别不大；
-  真要精细看，可以让 agent 用 `video_*`/`bili_frames` 类工具逐帧看（对聊天表情不划算）。
+- 备份：容器内 `/root/backups/bridge.js.bak-before-media-revert-*`（撤回前的版本）、
+  `bridge.js.bak-before-media-20261101-112345`（0004 之前的干净版）。
+- 残余 1：`>8MB` 的真·大图/大表情仍然看不到——这是刻意的，只报错不处理。
+- 残余 2：市场表情 CDN `raw300.gif` 是 QQ 侧的 404，换不来；现在只靠 `media.url` 直链。
+- 残余 3：动图她永远只看到一帧（模型限制）。要看清动作，得主人自己描述，或者以后真有需要再造工具。

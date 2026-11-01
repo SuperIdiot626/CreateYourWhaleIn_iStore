@@ -20,6 +20,28 @@
   地址，而 Samba 只绑 LAN）。修法：LAN 名与 tailnet 全名都在 hosts 里固化，并关掉该机的
   MagicDNS。根因链与验证见 [cases/2026-10-31-istoreos-smb-access.md](cases/2026-10-31-istoreos-smb-access.md)。
 
+## [0.2.9] - 2026-11-01
+
+撤回「动图归一化」，改为**只说清楚为什么看不了**。
+
+### Reverted
+
+- 撤回 `0.2.8` 的媒体归一化方案（`0004` 补丁 + `src/media-normalize.js` + `maxBytes` 24MB）。
+  主人判断：聊天场景不值得为图片做处理，偶发看不了就报清楚原因。
+  `socialV2.media.maxBytes` 回到 8MB。
+
+### Changed
+
+- **`0005-media-oversize-message.patch`**：图片/表情超过大小上限时，
+  `fetchOneBotImage()` 返回 `{ tooLarge: true }`，两个消费方把它翻译成
+  `[图片1（超过 8MB 大小上限，看不了）]` —— 她能直接告诉主人"这张太大"，而不是含糊的"获取失败"。
+
+### Notes
+
+- 复盘（含被撤回方案的技术记录，供以后参考）：
+  [cases/2026-11-01-media-gif-webp.md](cases/2026-11-01-media-gif-webp.md)。
+- 撤回过程中一次部署脚本写错导致桥接空转约 2 分钟，已恢复；入站自愈/看门狗未受影响。
+
 ## [0.2.8] - 2026-11-01
 
 QQ 动图（GIF/WebP 表情）取不到、也「动不了」——两个独立问题一起修。

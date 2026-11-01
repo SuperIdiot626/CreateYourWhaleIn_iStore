@@ -54,19 +54,25 @@ OneBot send_private_msg 失败: 文件处理失败: 识别URL失败, uri= /root/
 > 11-01 01:33 被踢 → 09 小时离线就是这个（NapCat 干等扫码，`3000`/`3001` 全程没开，
 > 桥接一直在正确地重试，但没码就没戏）。
 
-## 0004-media-normalize.patch
+## ~~0004-media-normalize.patch~~（已撤回，2026-11-01）
 
-2026-11-01：QQ 动图（GIF/WebP 表情）取不到、也「动不了」。改 3 处 + 新增 1 个模块：
+试过一版「把 QQ 动图归一化成 3 帧小 JPEG」的补丁（8MB 上限放宽到 24MB + ffmpeg 抽帧），
+主人看过之后决定**不为聊天场景做图像处理**，当天撤回，补丁文件与 `src/media-normalize.js` 都已删除。
+只保留一条改进 —— 见下面的 0005。
 
-| 位置 | 改动 |
-|---|---|
-| 新增 `src/media-normalize.js` | 用 ffprobe/ffmpeg 把收到的图归一化成「模型能看的几张小 JPEG」：动图等距抽 ≤3 帧，静图缩一张，长边 ≤960、单帧 ≤900KB |
-| `fetchOneBotImage()` | 取到原始字节后先归一化，返回 `{frames, animated, note}`；失败退回原图 |
-| `resolveMediaList()` / `fetchMediaData()` | 两个消费方都按帧推给模型 / 工具，并带 `[动图，已抽 3 帧]` 说明 |
-| `config.json` 的 `socialV2.media.maxBytes` | 8MB → 24MB（bridge 侧 clamp 上限 20MB → 32MB），先取回来再归一化 |
+## 0005-media-oversize-message.patch
 
-为什么：QQ 动图表情常常 >8MB（旧上限直接拒绝，CDN 兜底又 404），而就算取到，模型也只看得到一帧。
-归一化之后 8MB 动图 → 3 帧 × 45KB，既取得到、又能"看见动作"。
+2026-11-01：图片/表情**超过大小上限时，把原因说清楚**。
+
+旧行为：取不到就只写一行 `[图片1]（获取失败）`，agent 只能含糊地告诉主人"取不到"；
+主人也不知道是图太大、还是网络问题、还是格式不支持。
+
+新行为：`fetchOneBotImage()` 识别"超过大小限制"这一类失败，返回 `{ tooLarge: true }`；
+两个消费方（`resolveMediaList` / `fetchMediaData`）把它翻译成
+`[图片1（超过 8MB 大小上限，看不了）]`，大小上限按实际配置动态显示。
+
+> 只做这一件事：**不再抽帧、不放宽上限、不为聊天图做任何图像处理**。
+> QQ 动图 >8MB 就明确告诉主人"这张太大我看不了"，主人要么发小图，要么算了。
 
 ## 怎么打
 
@@ -79,8 +85,8 @@ patch -p1 < .../0001-surfcore-record-base64.patch
 patch -p1 < .../0002-bridge-inbound-selfheal.patch
 # 0003 的第二层对账补丁，基线是「打完 0002 之后」的 bridge.js
 patch -p1 < .../0003-bridge-inbound-reconcile.patch
-# 0004 的媒体归一化补丁，基线是「打完 0003 之后」的 bridge.js；新文件会一起创建
-patch -p1 < .../0004-media-normalize.patch
+# 0005 的超限提示补丁，基线是「打完 0003 之后、没打过 0004」的 bridge.js
+patch -p1 < .../0005-media-oversize-message.patch
 node --check src/bridge.js
 # 重启桥接
 ```
