@@ -68,6 +68,8 @@ cp mcp-bili.js /root/.dsh/surfcore/src/mcp-bili.js
 > `serverName: bili` 决定前缀 → `mcp__bili__*`。
 > ⚠️ 不要塞进 `qq-bridge MCP BEGIN/END` 区块，那段会被 `scripts/setup-dsh.mjs` 整体重写。
 
+这一步**不用重启容器**：DSH 会热重载并拉起新的 MCP 子进程（实测保存后几秒内生效）。
+
 ### 3. 加白名单 — `/root/.dsh/surfcore/plugins/surfcore/qq-tool-restrict.mjs`
 
 ```js
@@ -80,8 +82,28 @@ const SAFE_PREFIXES = [
 ]
 ```
 
-改完**不需要重启容器**：DSH 会热重载并拉起新的 MCP 子进程（实测保存后几秒内生效）。
-这一点很重要 —— PT 中转跑在容器里，重启容器会把它杀掉。
+> ## ⚠️ 改完必须重启 `dsh` 容器，热重载**不够**
+>
+> 2026-11-01 实测踩到：改了这个文件后 DSH 确实热重载了（日志里 `[qq-tool-restrict]` 重新打印），
+> 但**模型调用新工具仍被拒**。原因是 DSH 的热重载只重新执行插件的 `apply()`，
+> **不会让 Node 的 ESM 模块缓存失效** —— `SAFE_PREFIXES` 还是进程启动那一刻加载的旧值。
+>
+> 判断依据：`dsh web` 进程 10-30 22:50 启动、白名单 11-01 11:08 才改，
+> 期间重载多次但守卫一直是旧版；重启进程后立刻正常。
+>
+> ```sh
+> docker restart dsh
+> ```
+>
+> **重启会杀掉容器里跑的 PT announce 中转**（`/root/.dsh/im/pt-work/announce_bridge.py`，
+> 85 个种子指着它），必须手动拉回来：
+>
+> ```sh
+> docker exec -d dsh sh -c 'cd /root/.dsh/im/pt-work && nohup python3 announce_bridge.py 8899 >> bridge.out 2>&1 &'
+> ```
+>
+> 重启后 `bridge.js`（DSH 自己拉起）、`voice-edge`（每分钟 cron 兜底）会自动回来，
+> **只有这个中转需要手动补**。
 
 ## 验证
 
