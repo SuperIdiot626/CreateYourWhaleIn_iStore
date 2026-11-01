@@ -229,6 +229,21 @@ def light_refresh_qr():
     return None
 
 
+def current_qr_url():
+    """取 NapCat 当前二维码对应的解码链接（https://txz.qq.com/p?k=...）。
+
+    手机 QQ 直接打开这个链接会进入「确认登录」页 —— 只有一台手机、二维码又推在
+    微信里没法扫的时候，这是唯一能自举的路子（主人 2026-11-01 提的痛点）。
+    """
+    port, cred = webui_login()
+    if not cred:
+        return ""
+    status, body = _webui_post(port, "/api/QQLogin/CheckLoginStatus", {}, cred)
+    data = (body.get("data") or {}) if isinstance(body, dict) else {}
+    url = str(data.get("qrcodeurl") or "").strip()
+    return url if url.startswith("http") else ""
+
+
 def force_new_qr():
     """当场让 NapCat 生成一张新码。
 
@@ -352,6 +367,15 @@ def main():
             f"二维码来了（{time.strftime('%H:%M')} 刚生成，约 2 分钟有效）。"
             f"扫完回我一声；过期了就说「重发」，我再给你一张新的。"
         )
+        # 只有一台手机时没法"扫自己屏幕上的码" ⇒ 把解码链接也发过去，
+        # 手机 QQ 点开链接就能直接确认登录（不用扫）。
+        qr_url = current_qr_url()
+        if qr_url:
+            push_text(
+                "扫不了的话用这个（不用扫）：在手机 QQ 里直接打开下面的链接，"
+                "会跳到「确认登录」，点确认就行。\n"
+                f"{qr_url}"
+            )
         st = load_state()
         st["pendingScan"] = False
         st["lastQrPushAt"] = now
