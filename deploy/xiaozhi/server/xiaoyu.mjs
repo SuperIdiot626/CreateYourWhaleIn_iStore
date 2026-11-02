@@ -1,4 +1,4 @@
-// 「小鱼的大脑」：调 iStore 上的 SurfCore pet-api，拿她的回复 + 她的声音
+﻿// 「小鱼的大脑」：调 iStore 上的 SurfCore pet-api，拿她的回复 + 她的声音
 //
 // 为什么走 pet-api：那边已经有完整的一套 —— 人格卡 + 记忆卡拼 system prompt、
 // 一次 LLM 调用出结果、对话还会写进记忆 inbox；TTS 走 voice-edge（她的音色 + 语气标记）。
@@ -13,29 +13,40 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PET_BASE = String(process.env.PET_BASE || 'http://192.168.31.200:3080').replace(/\/$/, '');
+const DEFAULT_PET_BASE = 'http://192.168.31.200:3080';
 
-// 令牌不写进仓库：优先环境变量，其次 server/pet.env.json（已 gitignore）
+// 地址和令牌都不写进仓库：优先环境变量，其次 server/pet.env.json（已 gitignore）
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-let cachedToken = null;
+let cachedCfg = null;
+function loadCfg() {
+  if (cachedCfg) return cachedCfg;
+  let token = String(process.env.PET_TOKEN || '').trim();
+  let base = String(process.env.PET_BASE || '').replace(/\/$/, '');
+  if (!token || !base) {
+    try {
+      // 去掉 BOM：PowerShell 的 Set-Content -Encoding UTF8 会写 BOM，
+      // 带 BOM 的字符串 JSON.parse 会抛错 —— 现场就是这么踩的（令牌读成空）。
+      const raw = fs.readFileSync(path.join(HERE, 'pet.env.json'), 'utf8').replace(/^\uFEFF/, '');
+      const j = JSON.parse(raw);
+      if (!token) token = String(j.token || '').trim();
+      if (!base && j.base) base = String(j.base).replace(/\/$/, '');
+    } catch {}
+  }
+  cachedCfg = { base: base || DEFAULT_PET_BASE, token };
+  return cachedCfg;
+}
+
+/** 给 server.mjs 用（主动说话要调 /events，需要 base + token） */
+export function petConfig() {
+  return loadCfg();
+}
+
+function petBase() {
+  return loadCfg().base;
+}
+
 function petToken() {
-  if (cachedToken !== null) return cachedToken;
-  const env = String(process.env.PET_TOKEN || '').trim();
-  if (env) {
-    cachedToken = env;
-    return cachedToken;
-  }
-  try {
-    // 去掉 BOM：PowerShell 的 `Set-Content -Encoding UTF8` 会写 BOM，
-    // 带 BOM 的字符串 JSON.parse 会抛错 —— 现场就是这么踩的（令牌读成空）。
-    const raw = fs.readFileSync(path.join(HERE, 'pet.env.json'), 'utf8').replace(/^\uFEFF/, '');
-    const j = JSON.parse(raw);
-    cachedToken = String(j.token || '').trim();
-    if (j.base && !process.env.PET_BASE) process.env.PET_BASE = j.base;
-  } catch (e) {
-    cachedToken = '';
-  }
-  return cachedToken;
+  return loadCfg().token;
 }
 
 const OUT_RATE = 16000;      // 板子解码器按 24k 开、但发 16k 会被重采样播出来（已验证）
@@ -53,7 +64,7 @@ export async function askXiaoyu(text, { timeoutMs = 45000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${PET_BASE}/dsh-surfcore/pet-api/chat`, {
+    const res = await fetch(`${petBase()}/dsh-surfcore/pet-api/chat`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -73,7 +84,7 @@ export async function askXiaoyu(text, { timeoutMs = 45000 } = {}) {
     // 有音频就把 WAV 拉回来（URL 带 token，直接请求即可）
     const audioUrl = reply.audio?.url;
     if (audioUrl) {
-      const abs = audioUrl.startsWith('http') ? audioUrl : `${PET_BASE}${audioUrl}`;
+      const abs = audioUrl.startsWith('http') ? audioUrl : `${petBase()}${audioUrl}`;
       const a = await fetch(abs, { signal: controller.signal });
       if (a.ok) out.wav = Buffer.from(await a.arrayBuffer());
       else out.audioError = `音频 HTTP ${a.status}`;
@@ -173,4 +184,5 @@ export function wavToOpusPackets(wav) {
   }
   return packets;
 }
+
 

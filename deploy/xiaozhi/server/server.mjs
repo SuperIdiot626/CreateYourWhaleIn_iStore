@@ -1,4 +1,4 @@
-﻿// 小智开发板对接 · 第一阶段「假后端」
+// 小智开发板对接 · 第一阶段「假后端」
 //
 // 目的不是做产品，是把三个未知数钉死：
 //   ① 板子能不能连上我们自己的服务器（OTA + WS 握手）
@@ -17,7 +17,7 @@ import { WebSocketServer } from 'ws';
 import {
   UtteranceDetector, createDecoder, decodeFrame, transcribe,
 } from './asr.mjs';
-import { askXiaoyu, wavToOpusPackets } from './xiaoyu.mjs';
+import { askXiaoyu, wavToOpusPackets, petConfig } from './xiaoyu.mjs';
 import OpusScript from 'opusscript';
 import os from 'node:os';
 
@@ -211,6 +211,138 @@ function pickLiveDevice() {
     if (!best || seen >= (best.__info?.lastSeen ?? 0)) best = ws;
   }
   return best;
+}
+
+// ── 设备侧 MCP 桥（B）────────────────────────────────────────────────
+//
+// 板子固件自带一组 MCP 工具（self.get_device_status / self.audio_speaker.set_volume /
+// self.screen.* / self.led.set_color / self.reboot …）。这些工具活在板子上，
+// QQ 侧的她看不见。这里做一个最小桥：
+//   后端 ↔ 板子：发 {"type":"mcp","payload":{jsonrpc,id,method,params}} 收 result
+//   对外暴露：GET /device/tools、POST /device/call（给 iStore 的 board_device_* 工具用）
+let mcpSeq = 1;
+const mcpPending = new Map(); // id → {resolve, reject, timer}
+
+function sendMcpRpc(ws, method, params = {}, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const id = mcpSeq++;
+    const timer = setTimeout(() => {
+      mcpPending.delete(id);
+      reject(new Error(`板子没回 ${method}（${timeoutMs}ms 超时）`));
+    }, timeoutMs);
+    mcpPending.set(id, { resolve, reject, timer });
+    sendJson(ws, { type: 'mcp', payload: { jsonrpc: '2.0', id, method, params } });
+  });
+}
+
+async function callDevice(method, params = {}, timeoutMs = 8000) {
+  const ws = pickLiveDevice();
+  if (!ws) throw new Error('板子没连上（没开机 / 不在嘴模式 / 网络不通）');
+  return sendMcpRpc(ws, method, params, timeoutMs);
+}
+
+/** 收到板子的 MCP 回包时唤醒对应的 Promise */
+function resolveMcpReply(payload) {
+  const id = Number(payload?.id);
+  const slot = mcpPending.get(id);
+  if (!slot) {
+    log('MCP', `未匹配的回包 id=${payload?.id}`);
+    return;
+  }
+  clearTimeout(slot.timer);
+  mcpPending.delete(id);
+  if (payload.error) slot.reject(new Error(payload.error.message || 'MCP error'));
+  else slot.resolve(payload.result);
+}
+
+// ── 主动说话（D）────────────────────────────────────────────────────
+//
+// 她自己决定要说话时，SurfCore 的「目的机制」会往 pet-api 推一个 proactive 事件
+// （带文字 + 已合成的语音）。这里长轮询 /events，拿到就推给板子。
+// 板子没连上就进队列，下次连上再播。
+let proactiveCursor = null;
+let proactiveRunning = false;
+let proactiveCount = 0;
+
+async function pollProactiveOnce() {
+  const cfg = petConfig();
+  if (!cfg.token) return;
+  const q = new URLSearchParams({ client: 'board' });
+  if (proactiveCursor != null) q.set('since', String(proactiveCursor));
+  const res = await fetch(`${cfg.base}/dsh-surfcore/pet-api/events?${q}`, {
+    headers: { 'x-pet-token': cfg.token, accept: 'application/json' },
+    signal: AbortSignal.timeout(25000),
+  });
+  if (!res.ok) throw new Error(`/events HTTP ${res.status}`);
+  const j = await res.json();
+  if (!j.ok) throw new Error(j.error || '/events 返回 ok=false');
+  proactiveCursor = j.cursor ?? proactiveCursor;
+  for (const ev of j.events || []) {
+    if (ev.type !== 'proactive') continue;
+    if (!ev.audio?.url) {
+      log('PROACTIVE', `她说了话但没有语音（${ev.text || ''}），跳过`);
+      continue;
+    }
+    proactiveCount += 1;
+    log('PROACTIVE', `她主动想说：「${ev.text || ''}」`);
+    await playProactiveAudio(ev);
+  }
+}
+
+async function playProactiveAudio(ev) {
+  if (!poweredOn) {
+    log('POWER', '总开关关着 —— 主动消息不播');
+    return;
+  }
+  const cfg = petConfig();
+  const abs = ev.audio.url.startsWith('http') ? ev.audio.url : `${cfg.base}${ev.audio.url}`;
+  try {
+    const r = await fetch(abs, { signal: AbortSignal.timeout(20000) });
+    if (!r.ok) throw new Error(`音频 HTTP ${r.status}`);
+    const wav = Buffer.from(await r.arrayBuffer());
+    const ws = pickLiveDevice();
+    if (!ws) {
+      enqueueSpeak(wav, ev.text || '');
+      log('PROACTIVE', `板子没连上，先排队（队列 ${speakQueue.length}）`);
+      return;
+    }
+    const packets = wavToOpusPackets(wav);
+    await playPackets(ws, packets, ev.text || '');
+  } catch (e) {
+    log('PROACTIVE', '播放失败：', e.message);
+  }
+}
+
+async function proactiveLoop() {
+  if (proactiveRunning) return;
+  proactiveRunning = true;
+  // 先取一次水位（不带 since），避免启动时把历史弹幕重放一遍
+  try {
+    const cfg = petConfig();
+    if (cfg.token) {
+      const res = await fetch(`${cfg.base}/dsh-surfcore/pet-api/events?client=board`, {
+        headers: { 'x-pet-token': cfg.token, accept: 'application/json' },
+        signal: AbortSignal.timeout(15000),
+      });
+      const j = await res.json();
+      if (j.ok) {
+        proactiveCursor = j.cursor;
+        log('PROACTIVE', `已对齐事件水位 cursor=${proactiveCursor}`);
+      }
+    }
+  } catch (e) {
+    log('PROACTIVE', '取初始水位失败（稍后重试）：', e.message);
+  }
+  while (true) {
+    try {
+      await pollProactiveOnce();
+    } catch (e) {
+      log('PROACTIVE', '轮询失败：', e.message);
+      await new Promise((r) => setTimeout(r, 5000));
+      continue;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
 }
 
 function sendJson(ws, obj) {
@@ -487,6 +619,69 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
+  // A) 控灯（给 iStore 的 board_led 工具用，语义和 /test/led 一样）
+  if (req.method === 'POST' && url.pathname === '/led') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      let body = {};
+      try { body = JSON.parse(raw || '{}'); } catch {}
+      const live = pickLiveDevice();
+      if (!live) {
+        res.writeHead(409, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '板子没连上' }));
+        return;
+      }
+      const args = body.clear
+        ? { r: 0, g: 0, b: 0, clear: true }
+        : { r: Number(body.r ?? 255), g: Number(body.g ?? 170), b: Number(body.b ?? 0), clear: false };
+      sendMcp(live, 'self.led.set_color', args);
+      log('LED', `设色 r=${args.r} g=${args.g} b=${args.b} clear=${args.clear}`);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, args }));
+    });
+    return;
+  }
+
+  // B) 设备工具桥：列出板子上的 MCP 工具
+  if (req.method === 'GET' && url.pathname === '/device/tools') {
+    (async () => {
+      try {
+        const result = await callDevice('tools/list', {});
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: true, result }));
+      } catch (e) {
+        res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: e.message }));
+      }
+    })();
+    return;
+  }
+
+  // B) 设备工具桥：调用板子上的某个 MCP 工具
+  if (req.method === 'POST' && url.pathname === '/device/call') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      (async () => {
+        try {
+          const body = JSON.parse(raw || '{}');
+          const name = String(body.name || '').trim();
+          if (!name) throw new Error('缺 name');
+          const args = body.arguments && typeof body.arguments === 'object' ? body.arguments : {};
+          log('MCP', `调用设备工具 ${name} ${JSON.stringify(args).slice(0, 120)}`);
+          const result = await callDevice('tools/call', { name, arguments: args }, 15000);
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: true, result }));
+        } catch (e) {
+          res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: e.message }));
+        }
+      })();
+    });
+    return;
+  }
+
   // 控灯测试：让板子亮成指定颜色（验证 self.led.set_color 这个 MCP 工具）
   if (req.method === 'POST' && url.pathname === '/test/led') {
     let raw = '';
@@ -681,7 +876,8 @@ wss.on('connection', (ws, req) => {
     }
 
     if (msg.type === 'mcp') {
-      log('MCP', '设备侧 MCP 消息（先不处理）');
+      // 板子对我们 MCP 调用的回包（tools/list / tools/call 的结果）
+      resolveMcpReply(msg.payload);
       return;
     }
 
@@ -699,6 +895,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   log('BOOT', `实验后端已启动  http://0.0.0.0:${PORT}`);
   log('BOOT', `局域网地址：${lanIps().map((ip) => `http://${ip}:${PORT}`).join('  ')}`);
   log('BOOT', 'OTA: GET /xiaozhi/ota/   主动推送: POST /test/push   状态: GET /');
+  void proactiveLoop(); // 主动说话：长轮询她的 proactive 事件
 });
 
 

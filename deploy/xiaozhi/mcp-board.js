@@ -144,7 +144,7 @@ server.tool(
       return {
         content: [{
           type: 'text',
-          text: `板子：${j.devices > 0 ? '在线' : '不在线'}` +
+          text: `板子：${(j.devices?.length ?? 0) > 0 ? '在线' : '不在线'}` +
             `，总开关${j.poweredOn ? '开着' : '关着'}` +
             `，积压 ${j.speakQueue ?? 0} 条。`,
         }],
@@ -155,5 +155,107 @@ server.tool(
   },
 );
 
+// ── A：控灯（板载那颗 RGB，GPIO48）──────────────────────────────────
+server.tool(
+  'board_led',
+  '把房间里板子上的那颗小灯调成指定颜色（情绪色）。待机时是灭的、听的时候是红的、说话时是绿的——' +
+    '你想让她"亮个颜色"表达心情时才用。用 clear=true 交还默认配色。',
+  {
+    r: z.number().int().min(0).max(255).describe('红 0-255'),
+    g: z.number().int().min(0).max(255).describe('绿 0-255'),
+    b: z.number().int().min(0).max(255).describe('蓝 0-255'),
+    clear: z.boolean().optional().describe('true = 交还默认状态配色'),
+  },
+  async ({ r, g, b, clear }) => {
+    try {
+      const res = await fetch(`${boardBase()}/led`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(clear ? { clear: true } : { r, g, b }),
+        signal: AbortSignal.timeout(8000),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.ok === false) throw new Error(j.error || `HTTP ${res.status}`);
+      return {
+        content: [{
+          type: 'text',
+          text: clear ? '灯交还给默认配色了。' : `灯调成 rgb(${r}, ${g}, ${b}) 了。`,
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: 'text', text: `板子没连上，灯没调成：${e.message}` }] };
+    }
+  },
+);
+
+// ── B：把板子自己的 MCP 工具桥过来 ─────────────────────────────────
+server.tool(
+  'board_device_tools',
+  '列出板子本身就有的工具（音量、屏幕亮度、主题、设备状态、重启、控灯…）。' +
+    '想知道板子能干什么、或者要调某个硬件能力时先调这个。',
+  {},
+  async () => {
+    try {
+      const res = await fetch(`${boardBase()}/device/tools`, { signal: AbortSignal.timeout(12000) });
+      const j = await res.json();
+      if (!res.ok || j.ok === false) throw new Error(j.error || `HTTP ${res.status}`);
+      const tools = (j.result?.tools || []).map((t) => {
+        const props = t.inputSchema?.properties
+          ? Object.entries(t.inputSchema.properties)
+            .map(([k, v]) => `${k}:${v.type || '?'}`)
+            .join(', ')
+          : '';
+        return `- ${t.name}${props ? `(${props})` : ''}：${String(t.description || '').slice(0, 80)}`;
+      });
+      return {
+        content: [{
+          type: 'text',
+          text: tools.length ? `板子上的工具（${tools.length} 个）：\n${tools.join('\n')}` : '板子没报工具。',
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: 'text', text: `拿不到板子的工具列表：${e.message}` }] };
+    }
+  },
+);
+
+server.tool(
+  'board_device_call',
+  '调用板子上的一个工具（名字从 board_device_tools 拿）。例如把音量调到 60：' +
+    'board_device_call(name="self.audio_speaker.set_volume", arguments={"volume":60})。',
+  {
+    name: z.string().min(1).describe('工具名，如 self.audio_speaker.set_volume'),
+    arguments: z.string().optional().describe('参数 JSON 字符串，例如 {"volume":60}；无参数可留空'),
+  },
+  async ({ name, arguments: argsText }) => {
+    let args = {};
+    if (argsText && String(argsText).trim()) {
+      try {
+        args = JSON.parse(String(argsText));
+      } catch {
+        return { content: [{ type: 'text', text: `arguments 不是合法 JSON：${argsText}` }] };
+      }
+    }
+    try {
+      const res = await fetch(`${boardBase()}/device/call`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, arguments: args }),
+        signal: AbortSignal.timeout(20000),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.ok === false) throw new Error(j.error || `HTTP ${res.status}`);
+      const content = j.result?.content;
+      const text = Array.isArray(content)
+        ? content.map((c) => c?.text ?? JSON.stringify(c)).join('\n')
+        : JSON.stringify(j.result);
+      return { content: [{ type: 'text', text: `${name} → ${String(text).slice(0, 500)}` }] };
+    } catch (e) {
+      return { content: [{ type: 'text', text: `调用 ${name} 失败：${e.message}` }] };
+    }
+  },
+);
+
 await server.connect(new StdioServerTransport());
+
 

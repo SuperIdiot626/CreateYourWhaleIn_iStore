@@ -236,3 +236,55 @@ QQ 里的她 ──board_say──> iStore：(voice-edge 合成她的声音) ─
 
 > 完整交接（按键、起服务、固件改动清单、剩余待办）见
 > `DSH/notes/2026-11-03-xiaozhi-board-handoff.md`
+
+---
+
+# 第四阶段：A/B/C/D 收尾（2026-11-03 凌晨）
+
+主人在睡前的最后一批需求，全做完。
+
+## A. 她能控灯 ✅
+
+新工具 `mcp__board__board_led(r,g,b,clear)` → 后端 `/led` → 设备 MCP `self.led.set_color`。
+提示词里写了用途：暖黄=开心、暗蓝=困了，可以用完交还默认配色。
+
+## B. 板子的 MCP 工具桥 ✅
+
+板子固件自带 7 个 MCP 工具（设备状态、音量、屏幕主题、灯、灯控），之前她看不见。
+现在后端实现了最小 MCP 桥：
+
+```
+iStore 工具 board_device_tools / board_device_call
+        ↓ HTTP
+PC 后端 /device/tools、/device/call
+        ↓ WS {"type":"mcp","payload":{jsonrpc,id,method,params}}
+板子 McpServer（tools/list、tools/call）
+```
+
+实测：列出 7 个工具、调 `self.audio_speaker.set_volume` 返回 `true`。
+
+## C. 屏幕换成小鱼 ✅（已刷机，待主人目视确认）
+
+屏幕原本显示的是 **Noto Emoji 子集字体**里的"圆脸"，那套字体里没有鱼。
+所以改成 **LVGL 1bpp 画布程序化画一条鱼**（椭圆身体 + 三角尾巴 + 挖空的眼睛和嘴），
+不依赖字体子集：
+
+- `display.h`：加 `virtual bool SetFishIcon(bool)`
+- `oled_display.*`：`EnsureFishIcon()` 懒创建画布；`SetFishIcon(true)` 显示小鱼并藏起表情；
+  `SetEmotion()` 在 fish 模式下直接返回（不让表情覆盖）
+- `application.cc`：纯输出模式开机时 `SetFishIcon(true)`，官方模式 `false`
+
+## D. 主动说话 ✅（实现完成，需白天验证）
+
+后端长轮询 `pet-api /events`（先对齐水位、之后带 `since`），
+收到 `type=proactive` 事件就取她的语音（WAV）转 Opus 推给板子；板子没连就进队列。
+
+实测注意：她的「目的机制」有静默时段（`quietStart 23:30 / quietEnd 08:30`），
+半夜强制触发会返回 409 —— **这是设计如此**，不是 bug。要验证得白天。
+
+## 这一轮的坑
+
+| 坑 | 说明 |
+|---|---|
+| `board_status` 判在线写错 | `/status` 的 `devices` 是**数组**，拿它跟 0 比较永远 false → 改成 `j.devices.length` |
+| 屏幕 emoji 是子集字体 | 不能假设 `🐟` 存在，自绘更稳 |
