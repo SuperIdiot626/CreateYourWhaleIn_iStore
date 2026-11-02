@@ -12,6 +12,7 @@
 // 跑法：npm start   （默认 0.0.0.0:8003）
 
 import http from 'node:http';
+import fs from 'node:fs';
 import { WebSocketServer } from 'ws';
 import OpusScript from 'opusscript';
 import os from 'node:os';
@@ -71,6 +72,11 @@ async function replyOnce(ws, info, reason) {
   info.answered = true;
   info.busy = true;
   info.armed = false; // 回完就解除武装：等下一次唤醒词，避免自问自答死循环
+  if (!poweredOn) {
+    log('POWER', '已关闭 —— 听见了也不回');
+    info.busy = false;
+    return;
+  }
   log('REPLY', `开始回话（${reason}），本轮收到 ${info.turnFrames} 包`);
   try {
     sendJson(ws, { type: 'stt', text: '（实验后端：还没接 ASR，先回一段测试音）' });
@@ -91,6 +97,10 @@ function sendJson(ws, obj) {
 
 /** 推一段测试音（含完整的 tts start / stop 包） */
 async function pushTts(ws, text = '主动推送测试') {
+  if (!poweredOn) {
+    log('POWER', '已关闭 —— 不推送');
+    return;
+  }
   sendJson(ws, { type: 'llm', emotion: 'neutral' });
   sendJson(ws, { type: 'tts', state: 'start' });
   sendJson(ws, { type: 'tts', state: 'sentence_start', text });
@@ -154,6 +164,93 @@ function sendOta(res) {
   log('OTA', `已下发 ws://${host}:${PORT}/xiaozhi/v1/`);
 }
 
+// ── 总开关：主人可以随时把板子"关掉" ────────────────────────────────
+//
+// 需求来自主人：PC 不是一直在线，而且不是每时每刻都想让她讲话。
+// 关掉之后：不回答、不主动推，板子退回一台只会亮灯的摆设。
+//
+// 状态落盘到 state.json，重启后端不会忘记。
+const STATE_FILE = new URL('./state.json', import.meta.url);
+let poweredOn = true;
+
+function loadState() {
+  try {
+    const raw = fs.readFileSync(STATE_FILE, 'utf8');
+    const s = JSON.parse(raw);
+    if (typeof s.poweredOn === 'boolean') poweredOn = s.poweredOn;
+  } catch {
+    // 没有就当作开着
+  }
+}
+function saveState() {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ poweredOn }, null, 2), 'utf8');
+  } catch (e) {
+    log('STATE', '写 state.json 失败：', e.message);
+  }
+}
+loadState();
+
+function statusJson() {
+  return {
+    ok: true,
+    port: PORT,
+    host: pickHost(),
+    ips: lanIps(),
+    poweredOn,
+    devices: [...devices].map((ws) => ws.__info ?? {}),
+    pushCount,
+    frameMs: FRAME_MS,
+  };
+}
+
+const PAGE = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>小鱼的板子</title>
+<style>
+ body{font-family:system-ui,sans-serif;background:#0f1115;color:#e8eaef;margin:0;
+      display:flex;min-height:100vh;align-items:center;justify-content:center}
+ .card{text-align:center;padding:32px}
+ h1{font-size:20px;font-weight:600;margin:0 0 8px}
+ .st{font-size:15px;margin:0 0 24px;opacity:.8}
+ button{font-size:18px;padding:14px 36px;border-radius:999px;border:0;cursor:pointer;
+        background:#2b6ef6;color:#fff;font-weight:600}
+ button.off{background:#e5484d}
+ .hint{margin-top:20px;font-size:13px;opacity:.5;line-height:1.6}
+</style></head><body><div class="card">
+ <h1>小鱼的板子</h1>
+ <p class="st" id="st">—</p>
+ <button id="btn">—</button>
+ <p class="hint">关掉后她不听也不说，只留着灯。<br>PC 关机时板子自然也是哑的。</p>
+</div><script>
+ let on = true;
+ async function refresh(){
+   const r = await fetch('/status').then(x=>x.json());
+   on = r.poweredOn;
+   document.getElementById('st').textContent = on ? '她现在听着' : '她已经被关掉';
+   const b = document.getElementById('btn');
+   b.textContent = on ? '关掉' : '打开';
+   b.className = on ? 'off' : '';
+ }
+ document.getElementById('btn').onclick = async () => {
+   await fetch('/api/power', {method:'POST',headers:{'content-type':'application/json'},
+     body: JSON.stringify({on: !on})});
+   await refresh();
+ };
+ refresh(); setInterval(refresh, 3000);
+</script></body></html>`;
+
+/** 给设备发一条 MCP 调用（tools/call）。payload 必须是对象。 */
+function sendMcp(ws, name, args = {}) {
+  const payload = {
+    jsonrpc: '2.0',
+    id: Date.now() % 100000,
+    method: 'tools/call',
+    params: { name, arguments: args },
+  };
+  sendJson(ws, { type: 'mcp', payload });
+}
+
 const httpServer = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   log('HTTP', req.method, url.pathname);
@@ -193,19 +290,58 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  // 状态页：一眼看清连了谁、收了多少帧
-  if (req.method === 'GET' && url.pathname === '/') {
-    const body = {
-      ok: true,
-      port: PORT,
-      ips: lanIps(),
-      host: pickHost(),
-      devices: [...devices].map((ws) => ws.__info ?? {}),
-      pushCount,
-      frameMs: FRAME_MS,
-    };
+  // 状态（JSON，给脚本/排障用）
+  if (req.method === 'GET' && url.pathname === '/status') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(body, null, 2));
+    res.end(JSON.stringify(statusJson(), null, 2));
+    return;
+  }
+
+  // 总开关：手机/浏览器点一下就能关
+  if (req.method === 'POST' && url.pathname === '/api/power') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      try {
+        const body = JSON.parse(raw || '{}');
+        if (typeof body.on === 'boolean') {
+          poweredOn = body.on;
+          saveState();
+          log('POWER', poweredOn ? '已打开' : '已关闭（不听不说）');
+        }
+      } catch {}
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, poweredOn }));
+    });
+    return;
+  }
+
+  // 控灯测试：让板子亮成指定颜色（验证 self.led.set_color 这个 MCP 工具）
+  if (req.method === 'POST' && url.pathname === '/test/led') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => {
+      let body = {};
+      try { body = JSON.parse(raw || '{}'); } catch {}
+      if (devices.size === 0) {
+        res.writeHead(409, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '当前没有设备连着（先喊"你好小智"）' }));
+        return;
+      }
+      const args = body.clear
+        ? { r: 0, g: 0, b: 0, clear: true }
+        : { r: Number(body.r ?? 255), g: Number(body.g ?? 170), b: Number(body.b ?? 0), clear: false };
+      for (const ws of devices) sendMcp(ws, 'self.led.set_color', args);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, devices: devices.size, args }));
+    });
+    return;
+  }
+
+  // 首页：一个开关
+  if (req.method === 'GET' && url.pathname === '/') {
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    res.end(PAGE);
     return;
   }
 

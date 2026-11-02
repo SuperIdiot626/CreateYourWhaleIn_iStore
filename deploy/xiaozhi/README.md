@@ -95,11 +95,21 @@ I (99558) StateMachine: State: speaking -> listening
 
 ## 第二阶段：还没做
 
-- [ ] ASR（放 PC）
+- [ ] ASR（放 PC，用 faster-whisper）
 - [ ] 接 pet-api `/chat`（她的大脑：人格 + 记忆）
 - [ ] TTS 复用 voice-edge（她的音色）→ 转 Opus
 - [ ] 主动推送接到 `/events`（`proactive` 事件 → 播出来）
 - [ ] 记忆：板子对话只写摘要（`appendMemoryInboxEvent` 已有）
+
+### 已提前做的两件（2026-11-02 深夜）
+
+| 件 | 做法 |
+|---|---|
+| **她可以控灯** | 固件加 MCP 工具 `self.led.set_color`（r/g/b 0-255，`clear=true` 交还状态配色）。实现：`Led` 接口加 `SetUserColor/ClearUserColor` 虚函数（默认空实现，不影响别的板子），`SingleLed` 记住用户色并压住状态配色。测试端点 `POST /test/led` |
+| **主人能关掉板子** | 后端 `poweredOn` 状态（落盘 `state.json`）+ 网页开关：`http://<PC-IP>:8003/` 点一下就关。关掉后**不听也不说**，板子只剩灯 |
+
+> 总开关的设计动机：主人 PC 不是一直在线，且不是每时每刻都想让她讲话。
+> PC 关机 → 板子天然哑掉；PC 开着 → 用网页开关控制。
 
 ## 怎么跑
 
