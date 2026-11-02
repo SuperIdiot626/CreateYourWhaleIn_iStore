@@ -1,4 +1,4 @@
-// 小智开发板对接 · 第一阶段「假后端」
+﻿// 小智开发板对接 · 第一阶段「假后端」
 //
 // 目的不是做产品，是把三个未知数钉死：
 //   ① 板子能不能连上我们自己的服务器（OTA + WS 握手）
@@ -65,6 +65,51 @@ const TONE = makeTonePackets();
 
 // 主动推送的次数上限：验证阶段够用，避免误触发刷屏
 let pushCount = 0;
+
+// ── 「她要从板子说话」队列 ────────────────────────────────────────────
+//
+// 场景：主人在 QQ 跟她聊，她想顺口从房间的板子上说一句。
+// QQ 侧（iStore）的 MCP 工具会先把话用 voice-edge 合成成 WAV，再 POST 到 /speak。
+//
+// 但板子**空闲时是断开的**（固件只在对话时连服务器），所以这里要排队：
+// 有设备连着就立刻播；没有就先存着，等它下次连上（主人喊唤醒词）再播。
+const SPEAK_QUEUE_MAX = 5;
+const speakQueue = [];   // [{ wav: Buffer, text: string, at: number }]
+let speaking = false;
+
+async function drainSpeakQueue(ws) {
+  if (speaking) return;
+  speaking = true;
+  try {
+    while (speakQueue.length) {
+      const item = speakQueue[0];
+      if (ws.readyState !== ws.OPEN) return; // 断了就留着，下次再播
+      if (!poweredOn) {
+        log('POWER', '已关闭 —— 积压的消息先扣着');
+        return;
+      }
+      let packets = [];
+      try {
+        packets = wavToOpusPackets(item.wav);
+      } catch (e) {
+        log('SPEAK', '队列里的 WAV 转码失败，丢弃：', e.message);
+        speakQueue.shift();
+        continue;
+      }
+      log('SPEAK', `播积压消息（剩 ${speakQueue.length} 条）：「${item.text}」`);
+      await playPackets(ws, packets, item.text);
+      speakQueue.shift();
+    }
+  } finally {
+    speaking = false;
+  }
+}
+
+/** 往队列里塞一条，超过上限就丢最旧的 */
+function enqueueSpeak(wav, text) {
+  speakQueue.push({ wav, text, at: Date.now() });
+  while (speakQueue.length > SPEAK_QUEUE_MAX) speakQueue.shift();
+}
 
 /**
  * 播一段 Opus（60ms/包）给设备：tts start → sentence_start → 帧 → stop。
@@ -268,6 +313,7 @@ function statusJson() {
     poweredOn,
     devices: [...devices].map((ws) => ws.__info ?? {}),
     pushCount,
+    speakQueue: speakQueue.length,
     frameMs: FRAME_MS,
   };
 }
@@ -322,6 +368,47 @@ function sendMcp(ws, name, args = {}) {
 const httpServer = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   log('HTTP', req.method, url.pathname);
+
+  // 让她从板子说话：iStore 侧的 MCP 工具把语音合成好后 POST 过来。
+  // 用二进制而不是 base64：5 秒语音的 WAV 约 240KB，base64 会膨胀 33% 而且没必要。
+  if (req.method === 'POST' && url.pathname === '/speak') {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > 8 * 1024 * 1024) { // 8MB 上限，防误传
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      const wav = Buffer.concat(chunks);
+      const text = String(req.headers['x-speak-text'] || '').slice(0, 200);
+      if (!wav.length) {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: '空 body（应直接 POST WAV 字节）' }));
+        return;
+      }
+      if (!poweredOn) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, poweredOff: true, error: '板子总开关是关的' }));
+        return;
+      }
+      enqueueSpeak(wav, text || '(无文字)');
+      log('SPEAK', `收到 ${wav.length} 字节 WAV「${text || '(无文字)'}」，当前队列 ${speakQueue.length} 条`);
+      const target = [...devices][0];
+      if (target && !speaking) void drainSpeakQueue(target);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        played: Boolean(target),
+        queued: speakQueue.length,
+        devices: devices.size,
+      }));
+    });
+    return;
+  }
 
   // 小智固件启动时先打这个，拿到 WS 地址
   //
@@ -455,6 +542,8 @@ wss.on('connection', (ws, req) => {
   ws.__audioBuf = 0;
   devices.add(ws);
   log('WS', `设备已连接（共 ${devices.size} 台）`, info.deviceId || '(无 device-id)');
+  // 连上就把积压的「她要从板子说的话」播掉
+  if (speakQueue.length) setTimeout(() => { void drainSpeakQueue(ws); }, 800);
 
   // 每路连接：一个 Opus 解码器 + 一个端点检测器
   const decoder = createDecoder();
@@ -563,6 +652,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   log('BOOT', `局域网地址：${lanIps().map((ip) => `http://${ip}:${PORT}`).join('  ')}`);
   log('BOOT', 'OTA: GET /xiaozhi/ota/   主动推送: POST /test/push   状态: GET /');
 });
+
 
 
 
