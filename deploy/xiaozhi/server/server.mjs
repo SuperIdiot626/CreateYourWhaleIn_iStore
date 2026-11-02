@@ -1,4 +1,4 @@
-﻿// 小智开发板对接 · 第一阶段「假后端」
+// 小智开发板对接 · 第一阶段「假后端」
 //
 // 目的不是做产品，是把三个未知数钉死：
 //   ① 板子能不能连上我们自己的服务器（OTA + WS 握手）
@@ -467,16 +467,23 @@ wss.on('connection', (ws, req) => {
       // 设备发来的 Opus 音频
       info.framesIn += 1;
       info.turnFrames += 1;
-      if (info.framesIn <= 3 || info.framesIn % 50 === 0) {
-        log('AUDIO-IN', `第 ${info.framesIn} 包，${data.length} 字节`);
-      }
       // 解码 → 端点检测。检测器判出"这句说完了"就交给 ASR。
       // 不再用"数够 N 包"那种粗暴办法：那会截断长句、也会被噪声反复触发。
       const pcm = decodeFrame(decoder, data);
-      if (pcm) {
-        const utt = detector.push(pcm);
-        if (utt && info.armed) void handleUtterance(ws, info, utt);
+      if (!pcm) {
+        info.decodeFail = (info.decodeFail || 0) + 1;
+        if (info.decodeFail <= 3 || info.decodeFail % 100 === 0) {
+          log('AUDIO-IN', `解码失败第 ${info.decodeFail} 次（${data.length} 字节）`);
+        }
+        return;
       }
+      if (info.framesIn <= 3 || info.framesIn % 50 === 0) {
+        log('AUDIO-IN',
+          `第 ${info.framesIn} 包 ${data.length}B，电平 ${Math.round(detector.lastLevel ?? 0)}` +
+          ` / 阈值 ${Math.round(detector.lastThreshold ?? 0)}，已缓存 ${info.turnFrames} 包`);
+      }
+      const utt = detector.push(pcm);
+      if (utt && info.armed) void handleUtterance(ws, info, utt);
       return;
     }
     let msg;
@@ -556,6 +563,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   log('BOOT', `局域网地址：${lanIps().map((ip) => `http://${ip}:${PORT}`).join('  ')}`);
   log('BOOT', 'OTA: GET /xiaozhi/ota/   主动推送: POST /test/push   状态: GET /');
 });
+
 
 
 

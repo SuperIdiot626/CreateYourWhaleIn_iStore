@@ -1,4 +1,4 @@
-// 音频 → 文字：Opus 解码、端点检测（VAD）、调本地 ASR 服务
+﻿// 音频 → 文字：Opus 解码、端点检测（VAD）、调本地 ASR 服务
 //
 // 为什么需要自己判"说完了"：实测这版固件在 mode=auto 下**不发 listen:stop**，
 // 结束判断得由服务端做。早期的做法是"收够 50 包（3 秒）就当成说完"，
@@ -16,6 +16,10 @@ const END_SILENCE_FRAMES = 10;   // 之后连续 600ms 安静 = 说完了
 const MAX_UTTERANCE_FRAMES = 350; // 20.9s 强制截断，避免一直录下去
 const PREROLL_FRAMES = 4;        // 把开口前 240ms 也带上，免得吞掉第一个字
 const ABS_THRESHOLD = 260;       // 绝对能量下限（16bit RMS）
+// 阈值 = 底噪 × 系数，但**封顶**：底噪被环境抬上去（空调/TV/刚才的播放残留）时，
+// 3 倍系数会把阈值抬到人声之上，结果就是"一直在聆听中、怎么喊都不触发"。
+const NOISE_FACTOR = 1.8;
+const MAX_THRESHOLD = 2200;
 
 /** 一句完整的话：PCM + 统计信息 */
 export class Utterance {
@@ -40,6 +44,8 @@ export class UtteranceDetector {
   }
 
   reset() {
+    this.lastLevel = 0;
+    this.lastThreshold = 0;
     this.frames = [];        // 本轮已缓存的帧（含 preroll）
     this.totalFrames = 0;
     this.speechSeen = false;
@@ -72,7 +78,10 @@ export class UtteranceDetector {
     if (!this.speechSeen) {
       this.noiseFloor = this.noiseFloor * 0.95 + level * 0.05;
     }
-    const threshold = Math.max(ABS_THRESHOLD, this.noiseFloor * 3.0);
+    const threshold = Math.min(MAX_THRESHOLD, Math.max(ABS_THRESHOLD, this.noiseFloor * NOISE_FACTOR));
+    // 排障用：把最新一帧的电平和当前阈值暴露出去
+    this.lastLevel = level;
+    this.lastThreshold = threshold;
     const voiced = level > threshold;
 
     if (voiced) {
@@ -187,3 +196,5 @@ export async function transcribe(wav, { port = 8004, timeoutMs = 30000 } = {}) {
     clearTimeout(timer);
   }
 }
+
+
