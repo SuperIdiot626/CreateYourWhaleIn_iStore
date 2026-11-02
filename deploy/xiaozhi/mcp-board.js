@@ -1,4 +1,4 @@
-// 「从板子上说话」· 独立 MCP server
+﻿// 「从板子上说话」· 独立 MCP server
 //
 // 需求来由：主人在 QQ 跟她聊，但房间的 ESP32 板子上还有一只"同一个她"。
 // QQ 侧的她原本**不知道板子存在** —— 没有提示词、也没有工具，所以永远不会主动从那说话。
@@ -102,7 +102,8 @@ server.tool(
           method: 'POST',
           headers: {
             'content-type': 'audio/wav',
-            'x-speak-text': encodeURIComponent(say).slice(0, 180),
+            // 先截断**原始文字**再编码：先编码后截断会把多字节字符切断，后端解码就报错。
+            'x-speak-text': encodeURIComponent(say.slice(0, 60)),
           },
           body: wav,
           signal: controller.signal,
@@ -155,3 +156,4 @@ server.tool(
 );
 
 await server.connect(new StdioServerTransport());
+

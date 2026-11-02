@@ -202,6 +202,17 @@ async function replyOnce(ws, info, reason) {
 // ── 连上来的设备 ──────────────────────────────────────────────────────
 const devices = new Set();
 
+/** 挑一条**最近还活着**的连接（同设备可能有残留的旧 socket） */
+function pickLiveDevice() {
+  let best = null;
+  for (const ws of devices) {
+    if (ws.readyState !== ws.OPEN) continue;
+    const seen = ws.__info?.lastSeen ?? 0;
+    if (!best || seen >= (best.__info?.lastSeen ?? 0)) best = ws;
+  }
+  return best;
+}
+
 function sendJson(ws, obj) {
   const s = JSON.stringify(obj);
   log('SEND', s.length > 200 ? s.slice(0, 200) + '…' : s);
@@ -384,7 +395,11 @@ const httpServer = http.createServer((req, res) => {
     });
     req.on('end', () => {
       const wav = Buffer.concat(chunks);
-      const text = String(req.headers['x-speak-text'] || '').slice(0, 200);
+      // 头里是 URL 编码的（HTTP 头不能放中文），这里要解码回可读文字，
+      // 否则屏幕上显示的就是一串 %E8%BF%99…
+      let text = '';
+      try { text = decodeURIComponent(String(req.headers['x-speak-text'] || '')).slice(0, 200); }
+      catch { text = String(req.headers['x-speak-text'] || '').slice(0, 200); }
       if (!wav.length) {
         res.writeHead(400, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: false, error: '空 body（应直接 POST WAV 字节）' }));
@@ -397,7 +412,7 @@ const httpServer = http.createServer((req, res) => {
       }
       enqueueSpeak(wav, text || '(无文字)');
       log('SPEAK', `收到 ${wav.length} 字节 WAV「${text || '(无文字)'}」，当前队列 ${speakQueue.length} 条`);
-      const target = [...devices][0];
+      const target = pickLiveDevice();
       if (target && !speaking) void drainSpeakQueue(target);
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
@@ -439,7 +454,8 @@ const httpServer = http.createServer((req, res) => {
       return;
     }
     pushCount += 1;
-    for (const ws of devices) void pushTts(ws, `主动推送 #${pushCount}`);
+    const live = pickLiveDevice();
+    if (live) void pushTts(live, `主动推送 #${pushCount}`);
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true, devices: devices.size, pushCount }));
     return;
@@ -486,7 +502,8 @@ const httpServer = http.createServer((req, res) => {
       const args = body.clear
         ? { r: 0, g: 0, b: 0, clear: true }
         : { r: Number(body.r ?? 255), g: Number(body.g ?? 170), b: Number(body.b ?? 0), clear: false };
-      for (const ws of devices) sendMcp(ws, 'self.led.set_color', args);
+      const live = pickLiveDevice();
+    if (live) sendMcp(live, 'self.led.set_color', args);
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, devices: devices.size, args }));
     });
@@ -540,10 +557,40 @@ wss.on('connection', (ws, req) => {
   };
   ws.__info = info;
   ws.__audioBuf = 0;
+  info.lastSeen = Date.now();
+
+  // 同一台设备只保留**最新**一条连接。
+  // 板子重启/刷固件/切模式后，旧 socket 常常还挂在服务端（没有 FIN），
+  // 于是 devices 里堆一串死连接 —— 往第一条推就成了"日志显示播完了、但没人听见"。
+  if (info.deviceId) {
+    for (const other of [...devices]) {
+      if (other !== ws && other.__info && other.__info.deviceId === info.deviceId) {
+        log('WS', '清理同一设备的旧连接（换成新连上的这条）');
+        try { other.terminate(); } catch {}
+        devices.delete(other);
+      }
+    }
+  }
+
   devices.add(ws);
   log('WS', `设备已连接（共 ${devices.size} 台）`, info.deviceId || '(无 device-id)');
   // 连上就把积压的「她要从板子说的话」播掉
   if (speakQueue.length) setTimeout(() => { void drainSpeakQueue(ws); }, 800);
+
+  // 心跳：25 秒 ping 一次，两轮没 pong 就当这条连接死了，清掉
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; info.lastSeen = Date.now(); });
+  const heartbeat = setInterval(() => {
+    if (ws.isAlive === false) {
+      log('WS', '心跳超时，清掉这条连接');
+      clearInterval(heartbeat);
+      try { ws.terminate(); } catch {}
+      return;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  }, 25000);
+  ws.on('close', () => clearInterval(heartbeat));
 
   // 每路连接：一个 Opus 解码器 + 一个端点检测器
   const decoder = createDecoder();
@@ -552,6 +599,7 @@ wss.on('connection', (ws, req) => {
   info.detector = detector;
 
   ws.on('message', (data, isBinary) => {
+    info.lastSeen = Date.now();
     if (isBinary) {
       // 设备发来的 Opus 音频
       info.framesIn += 1;
@@ -652,6 +700,9 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   log('BOOT', `局域网地址：${lanIps().map((ip) => `http://${ip}:${PORT}`).join('  ')}`);
   log('BOOT', 'OTA: GET /xiaozhi/ota/   主动推送: POST /test/push   状态: GET /');
 });
+
+
+
 
 
 
