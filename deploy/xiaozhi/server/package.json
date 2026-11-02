@@ -1,0 +1,14 @@
+{
+  "name": "xiaozhi-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "小智开发板对接用的实验后端（协议验证 / 主动推送验证）",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "opusscript": "^0.1.1",
+    "ws": "^8.22.1"
+  }
+}
