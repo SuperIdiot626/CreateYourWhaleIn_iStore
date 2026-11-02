@@ -1,4 +1,4 @@
-// 小智开发板对接 · 第一阶段「假后端」
+﻿// 小智开发板对接 · 第一阶段「假后端」
 //
 // 目的不是做产品，是把三个未知数钉死：
 //   ① 板子能不能连上我们自己的服务器（OTA + WS 握手）
@@ -14,6 +14,10 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import { WebSocketServer } from 'ws';
+import {
+  UtteranceDetector, createDecoder, decodeFrame, transcribe,
+} from './asr.mjs';
+import { askXiaoyu, wavToOpusPackets } from './xiaoyu.mjs';
 import OpusScript from 'opusscript';
 import os from 'node:os';
 
@@ -62,28 +66,92 @@ const TONE = makeTonePackets();
 // 主动推送的次数上限：验证阶段够用，避免误触发刷屏
 let pushCount = 0;
 
-// 兜底：设备不发 listen:stop 时，收够这么多包（60ms/包）就当"说完了"。
-// 50 包 ≈ 3 秒；调小会更灵敏，但容易在人家还没说完时就打断。
-const ENUF_FRAMES = 50;
-
-/** 一次"回话"：先报 stt 文本，再推一段测试音。一次唤醒只回一次。 */
-async function replyOnce(ws, info, reason) {
-  if (!info.armed || info.answered || info.busy) return;
-  info.answered = true;
-  info.busy = true;
-  info.armed = false; // 回完就解除武装：等下一次唤醒词，避免自问自答死循环
-  if (!poweredOn) {
-    log('POWER', '已关闭 —— 听见了也不回');
-    info.busy = false;
-    return;
+/**
+ * 播一段 Opus（60ms/包）给设备：tts start → sentence_start → 帧 → stop。
+ * 帧要按 60ms 节奏发，发太快设备端缓冲会乱。
+ */
+async function playPackets(ws, packets, text) {
+  sendJson(ws, { type: 'llm', emotion: 'neutral' });
+  sendJson(ws, { type: 'tts', state: 'start' });
+  if (text) sendJson(ws, { type: 'tts', state: 'sentence_start', text });
+  for (const p of packets) {
+    if (ws.readyState !== ws.OPEN) return;
+    ws.send(p);
+    await new Promise((r) => setTimeout(r, FRAME_MS));
   }
-  log('REPLY', `开始回话（${reason}），本轮收到 ${info.turnFrames} 包`);
+  sendJson(ws, { type: 'tts', state: 'stop' });
+  log('PLAY', `播完 ${packets.length} 包（约 ${((packets.length * FRAME_MS) / 1000).toFixed(1)}s）`);
+}
+
+/**
+ * 一句话说完：ASR → 她的大脑（pet-api）→ 她的声音 → 播。
+ *
+ * 这是整条链路的终点，串了三个服务：
+ *   localhost:8004（ASR）→ 192.168.31.200:3080（pet-api）→ 板子
+ */
+async function handleUtterance(ws, info, utt) {
+  if (info.busy) return;
+  info.busy = true;
   try {
-    sendJson(ws, { type: 'stt', text: '（实验后端：还没接 ASR，先回一段测试音）' });
-    await pushTts(ws, '实验后端测试音');
+    log('VAD', `一句话结束：${utt.meta.ms}ms（${utt.meta.reason}，底噪 ${utt.meta.noiseFloor}）`);
+    if (!poweredOn) {
+      log('POWER', '已关闭 —— 听见了也不回');
+      return;
+    }
+    const t0 = Date.now();
+    const r = await transcribe(utt.wav);
+    if (!r.ok) {
+      log('ASR', '识别失败：', r.error);
+      return;
+    }
+    log('ASR', `识别(${r.ms}ms, ${r.audioSec}s) → 「${r.text}」`);
+    if (!r.text) {
+      log('ASR', '（没识别出内容，静默丢弃）');
+      return;
+    }
+    // 让她"听见"用户说了什么：屏幕上先显示识别结果
+    sendJson(ws, { type: 'stt', text: r.text });
+    info.lastText = r.text;
+
+    // 问她（要语音版：人格 + 记忆 + 她的音色一次拿到）
+    const ask = await askXiaoyu(r.text);
+    if (!ask.ok) {
+      log('BRAIN', '她那边出错：', ask.error);
+      await pushTts(ws, '出错了');
+      return;
+    }
+    log('BRAIN', `(${ask.ms}ms) → 「${ask.text}」`);
+
+    let packets = null;
+    if (ask.wav) {
+      try {
+        packets = wavToOpusPackets(ask.wav);
+        log('TTS', `她的语音：WAV ${ask.wav.length} 字节 → ${packets.length} 包 Opus`);
+      } catch (e) {
+        log('TTS', '转码失败：', e.message);
+      }
+    } else {
+      log('TTS', '没拿到音频：', ask.audioError || '(pet-api 未返回 audio)');
+    }
+
+    if (packets && packets.length) {
+      await playPackets(ws, packets, ask.text);
+    } else {
+      // 退路：至少把字显示出来 + 回一声提示音
+      await pushTts(ws, ask.text.slice(0, 18));
+    }
+    log('TIMING', `本轮总耗时 ${Date.now() - t0}ms（ASR + 她 + TTS）`);
   } finally {
     info.busy = false;
   }
+}
+
+/** 兼容旧路径：listen:stop 时把没说完的收尾 */
+async function replyOnce(ws, info, reason) {
+  if (!info.armed || info.answered || info.busy) return;
+  info.answered = true;
+  info.armed = false;
+  log('LISTEN', `收到收尾信号（${reason}）`);
 }
 
 // ── 连上来的设备 ──────────────────────────────────────────────────────
@@ -388,19 +456,26 @@ wss.on('connection', (ws, req) => {
   devices.add(ws);
   log('WS', `设备已连接（共 ${devices.size} 台）`, info.deviceId || '(无 device-id)');
 
+  // 每路连接：一个 Opus 解码器 + 一个端点检测器
+  const decoder = createDecoder();
+  const detector = new UtteranceDetector();
+  info.decoder = decoder;
+  info.detector = detector;
+
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
-      // 设备发来的 Opus 音频；逐包打日志会刷屏，只统计
+      // 设备发来的 Opus 音频
       info.framesIn += 1;
       info.turnFrames += 1;
       if (info.framesIn <= 3 || info.framesIn % 50 === 0) {
         log('AUDIO-IN', `第 ${info.framesIn} 包，${data.length} 字节`);
       }
-      // 兜底：设备不发 listen:stop，收够就自己判定"说完了"。
-      // 注意必须用 turnFrames（本轮计数）+ armed（唤醒过），否则回完一次后
-      // 累计计数仍然很大，会立刻再次触发 —— 现场就是"一直嘀嘀嘀"的死循环。
-      if (info.armed && !info.answered && !info.busy && info.turnFrames >= ENUF_FRAMES) {
-        void replyOnce(ws, info, `本轮收到 ${info.turnFrames} 包（约定 ${ENUF_FRAMES} 包即当作说完了）`);
+      // 解码 → 端点检测。检测器判出"这句说完了"就交给 ASR。
+      // 不再用"数够 N 包"那种粗暴办法：那会截断长句、也会被噪声反复触发。
+      const pcm = decodeFrame(decoder, data);
+      if (pcm) {
+        const utt = detector.push(pcm);
+        if (utt && info.armed) void handleUtterance(ws, info, utt);
       }
       return;
     }
@@ -434,22 +509,24 @@ wss.on('connection', (ws, req) => {
     //
     // 实测发现：wake 之后设备会「listen:detect → listen:start」，然后**连续推音频，
     // 却不发 listen:stop**（mode=auto 时结束判断在设备侧，它没触发）。
-    // 如果只等 stop，后端永远不回应，板子等 9 秒左右就 code=1006 断开。
-    // 所以这里加兜底：收够 ENUF_FRAMES 包（约 3 秒）就当"说完了"，主动回。
+    // 所以"说完了"由服务端的能量 VAD 判定（见 asr.mjs）；这里的 stop 只是兜底收尾。
     if (msg.type === 'listen') {
       if (msg.state === 'start') {
         info.turnFrames = 0;
+        detector.reset();
         log('LISTEN', `开始说话（mode=${msg.mode || '?'}，armed=${info.armed}）`);
         // 没被唤醒过就进来的聆听（回话后设备自动重启监听）不允许再回话
         if (!info.armed) info.answered = true;
       } else if (msg.state === 'stop') {
-        log('LISTEN', `说完了，本轮 ${info.turnFrames} 包`);
-        void replyOnce(ws, info, '收到 listen:stop');
+        log('LISTEN', `设备发来 listen:stop（本轮 ${info.turnFrames} 包）`);
+        const utt = detector.flush('listen-stop');
+        if (utt && info.armed) void handleUtterance(ws, info, utt);
       } else if (msg.state === 'detect') {
         log('LISTEN', `唤醒词命中：${msg.text ?? ''}`);
         info.armed = true;
         info.answered = false;
         info.turnFrames = 0;
+        detector.reset();
       }
       return;
     }
@@ -479,6 +556,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   log('BOOT', `局域网地址：${lanIps().map((ip) => `http://${ip}:${PORT}`).join('  ')}`);
   log('BOOT', 'OTA: GET /xiaozhi/ota/   主动推送: POST /test/push   状态: GET /');
 });
+
 
 
 

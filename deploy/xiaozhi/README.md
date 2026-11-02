@@ -93,13 +93,49 @@ I (99558) StateMachine: State: speaking -> listening
 2. 加一个 MCP 工具 `self.led.set_color`，让**她自己在回复里控灯**（情绪色）
 3. 保留官方配色，只在特定事件（她主动说话）时闪一下
 
-## 第二阶段：还没做
+## 第二阶段：整条链路跑通（2026-11-02 深夜）✅
 
-- [ ] ASR（放 PC，用 faster-whisper）
-- [ ] 接 pet-api `/chat`（她的大脑：人格 + 记忆）
-- [ ] TTS 复用 voice-edge（她的音色）→ 转 Opus
-- [ ] 主动推送接到 `/events`（`proactive` 事件 → 播出来）
-- [ ] 记忆：板子对话只写摘要（`appendMemoryInboxEvent` 已有）
+```
+板子（麦克风）→ Opus 上行
+     ↓ VAD（asr.mjs，能量+自适应底噪）
+  本地 ASR（asr_server.py，faster-whisper small/int8，~2s）
+     ↓ 文字
+  她的大脑（iStore: SurfCore pet-api `/chat`，modality=voice，~3-4s）
+     ↓ 回复文字 + 她的语音 WAV（voice-edge，24k）
+  转码（xiaoyu.mjs：24k→16k、线性重采样、Opus 60ms/包）
+     ↓ Opus 下行
+板子播放（她自己的声音）
+```
+
+真机实测两轮（2026-11-02 23:3x）：
+
+```
+[VAD] 一句话结束：1260ms（底噪 836）
+[ASR] 识别(1994ms) → 「你在干什么呢」
+[BRAIN] (4328ms) → 「没干嘛，就趴在你桌面角上待着呢，看你。你呢，忙完了没？」
+[TTS] WAV 293KB → 102 包 Opus（6.1s）
+第二轮: ASR 1642ms / BRAIN 2749ms / 播放 5.2s
+```
+
+### 三个服务怎么起
+
+| 服务 | 命令 | 端口 |
+|---|---|---|
+| ASR | `py -3.10 -u asr_server.py` | 8004（只绑回环） |
+| 小智后端 | `node server.mjs` | 8003（局域网） |
+| 她的大脑 | iStore 上已在跑（SurfCore） | 192.168.31.200:3080 |
+
+后端读 `server/pet.env.json`（**已 gitignore**）里的 `{base, token}`，令牌取自
+iStore 的 `~/.dsh/surfcore/pet/host.json`。
+
+### 已知问题 / 可优化
+
+| 问题 | 说明 |
+|---|---|
+| **首字延迟 ~6s** | ASR 2s + 她 4s（pet-api 是"想完 + 合成完"才返回）。想快得让 voice-edge 对局域网开放、按句流式合成 |
+| ASR 会误听（"天气"→"听起"） | small 模型；可换 medium（慢一倍）或加 `initial_prompt` 提示词 |
+| 设备持续推音频 | `mode=auto` 连续对话行为；VAD 在服务端兜底 |
+| 主动说话还没接 | 需要固件保持长连接 + 轮询 pet-api `/events` |
 
 ### 已提前做的两件（2026-11-02 深夜）
 
@@ -111,36 +147,46 @@ I (99558) StateMachine: State: speaking -> listening
 > 总开关的设计动机：主人 PC 不是一直在线，且不是每时每刻都想让她讲话。
 > PC 关机 → 板子天然哑掉；PC 开着 → 用网页开关控制。
 
+## 待办
+
+- [ ] **主动说话**：固件保持长连接 + 轮询 pet-api `/events`（她自己决定说不说）
+- [ ] **延迟优化**：voice-edge 开放到局域网 + 按句流式合成
+- [ ] **LED 情绪色**接进回复流程（现在工具通了，还没让她用）
+- [ ] **记忆摘要**：板子对话只写摘要（`appendMemoryInboxEvent` 已有，摘要在 SurfCore 侧补）
+- [ ] ASR 换 medium / 加 initial_prompt 提升中文准确率
+
 ## 怎么跑
 
 ```sh
 cd server
 npm install
-npm start          # 默认 0.0.0.0:8003
+
+# 1) ASR（PC 本地，模型加载约 18 秒）
+py -3.10 -u asr_server.py        # 127.0.0.1:8004
+
+# 2) 小智后端（另开一个窗口）
+node server.mjs                  # 0.0.0.0:8003
 ```
 
 | 入口 | 用途 |
 |---|---|
-| `GET /xiaozhi/ota/` | 固件启动时拿 WS 地址（会自动挑局域网 IP） |
-| `WS  /xiaozhi/v1/` | 小智协议 v1 |
-| `POST /test/push` | 手动触发一次**服务端主动推送**（验证点 ③） |
-| `GET /` | 状态：连了几台、收了多少帧 |
+| `GET /` | **总开关页面**（手机也能开）：点一下关掉她 |
+| `GET /status` | JSON 状态：设备数、开关、收包 |
+| `POST /api/power` | `{"on":false}` 关 / `{"on":true}` 开 |
+| `POST /test/push` | 手动触发一次服务端主动推送 |
+| `POST /test/led` | `{"r":255,"g":140,"b":0}` 控制板载灯；`{"clear":true}` 交还默认配色 |
+| `GET /xiaozhi/ota/` | 固件启动时拿 WS 地址（自动挑局域网 IP） |
+| `WS /xiaozhi/v1/` | 小智协议 v1 |
 
-环境变量：`PORT`（默认 8003）、`PUBLIC_HOST`（强制指定下发的地址）、`XZ_TOKEN`（留空=不校验）。
+环境变量：`PORT`、`PUBLIC_HOST`（强制下发地址）、`XZ_TOKEN`（留空=不校验）、
+`PET_BASE`/`PET_TOKEN`（也可写 `server/pet.env.json`）。
+
 
 ## 已经踩到的坑
 
 | 坑 | 说明 |
 |---|---|
 | **PC 有多块网卡** | 直接取「第一个非 internal 地址」会拿到 tailscale 的 `100.x`，板子连不上。已改成优先 `192.168.*`（并排掉 `192.168.137.*` 这块热点网卡），也可用 `PUBLIC_HOST` 强制 |
-| voice-edge 返回的是**裸 PCM**（`audio/L16`） | 不是 WAV，得自己加 44 字节 WAV 头才能给 ffmpeg 处理 |
-| 板子上**没有可控 LED** | PWR / TX / RX 是电源和串口指示灯，另有一颗蓝绿双色款同样不受控。状态反馈只能靠那块 OLED |
-
-## 待办
-
-- [ ] **引脚映射**：INMP441（SCK/WS/SD）、MAX98357A（BCLK/LRC/DIN）、OLED（SCL/SDA）各接哪个 GPIO
-- [ ] 板型确认：官方固件刷机时选的型号（决定能否直接复用它那套引脚）
-- [ ] PlatformIO 固件工程（`firmware/`，等引脚）
-- [ ] 接 ASR（放 PC）
-- [ ] 接 pet-api `/chat`
-- [ ] 主动推送打通（`/events` → TTS → 设备）
+| voice-edge 返回的是**裸 PCM**（`audio/L16`） | 不是 WAV，得自己加 44 字节 WAV 头 |
+| **`pet.env.json` 不能带 BOM** | PowerShell 的 `Set-Content -Encoding UTF8` 会写 BOM，Node 的 `JSON.parse` 直接抛错 → 令牌读成空、报"没配令牌"。代码里已 strip BOM，写文件时也注意 |
+| **端口占用** | 旧后端没退干净就起新的会 `EADDRINUSE`，表现为"改了代码不生效"。先 `Get-NetTCPConnection -LocalPort 8003` 看谁占着 |
