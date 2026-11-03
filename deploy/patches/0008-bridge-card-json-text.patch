@@ -1,0 +1,67 @@
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -1540,6 +1540,55 @@
+   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+ }
+ 
++/**
++ * QQ 结构化消息（json 段 / 分享卡片）→ 可读文本。
++ *
++ * 2026-11-04 本地补丁：原来 `case 'json'` 只吐 `[卡片消息]`，
++ * 于是主人在 QQ 里分享的 B站 视频（标题 + 链接 + 封面）到她这儿只剩四个字，
++ * 她当然说"看不到"。这里把卡片里的标题/描述/链接挖出来。
++ *
++ * 卡片的 `data.data` 是一个 JSON **字符串**（可能带转义的斜杠），
++ * 不同 provider 的字段位置不一样，所以既按已知结构取，也用正则兜底抓 URL。
++ */
++function cardSegToText(d) {
++  const raw = String(d?.data ?? d?.content ?? '').trim();
++  if (!raw) return '[卡片消息]';
++  const unescaped = raw.replace(/\\\//g, '/');
++
++  const parts = [];
++  const push = (v) => {
++    const s = String(v ?? '').replaceAll('\\/', '/').replace(/\s+/g, ' ').trim();
++    if (!s || s.length > 200) return;
++    if (!parts.includes(s)) parts.push(s);
++  };
++
++  let obj = null;
++  try { obj = JSON.parse(raw); } catch { try { obj = JSON.parse(unescaped); } catch {} }
++  if (obj) {
++    const meta = obj.meta ?? obj.metaData ?? {};
++    // 常见结构：meta.news / meta.detail_1 / meta.detail
++    for (const key of ['news', 'detail_1', 'detail', 'music', 'video']) {
++      const m = meta[key];
++      if (!m || typeof m !== 'object') continue;
++      push(m.title);
++      push(m.desc);
++      push(m.tag);
++      push(m.jumpUrl);
++      push(m.qqdocurl);
++      push(m.url);
++    }
++    // 小程序
++    if (obj.prompt) push(obj.prompt);
++  }
++
++  // 正则兜底：卡片里出现的任何 http(s) 链接（先反转义）
++  const urls = unescaped.match(/https?:\/\/[^\s"'<>\\]+/g) ?? [];
++  for (const u of urls.slice(0, 3)) push(u);
++
++  if (!parts.length) return '[卡片消息]';
++  return `[卡片消息: ${parts.join(' · ')}]`;
++}
++
+ async function segmentsToText(segments, options = {}) {
+   const { resolveAtName, resolveReply, includeReply = true } = options ?? {};
+   // 有些 OneBot 实现直接把纯文本消息放在 message 字段里（string）
+@@ -1586,7 +1635,7 @@
+         out.push(replyText || '[引用消息]');
+         break;
+       }
+-      case 'json': out.push('[卡片消息]'); break;
++      case 'json': out.push(cardSegToText(d)); break;
+       // markdown：SnowLuma 1.14.9 的线上段落是 `{type:'markdown',data:{content}}`。
+       // 上游 1.14.17+（commit 1934e4e7「include text alongside received markdown」）
+       // 起还会带上 `data.text`。两个形状都读，这样将来升级 SnowLuma 运行时不会退化成

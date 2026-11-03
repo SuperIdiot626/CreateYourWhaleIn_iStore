@@ -1,0 +1,31 @@
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -4093,7 +4093,7 @@
+       // 用**实际绑定端口**而不是配置值：测试夹具用 consolePort: 0 让系统分配端口，
+       // 配置里那个 0 不是请求里的 Host 端口。请求必然发生在 listen 之后，所以这里拿得到。
+       const boundPort = server.address()?.port ?? port;
+-      const allowedHosts = [`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`, `istoreos.tail9fd4a6.ts.net:3101`, `istoreos:3101`];
++      const allowedHosts = [`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`, `192.168.31.200:${boundPort}`, `istoreos.tail9fd4a6.ts.net:3101`, `istoreos:3101`];
+       if (!allowedHosts.includes(hostHeader.toLowerCase())) {
+         sendJson({ ok: false, error: `Host 头不被允许（${hostHeader || '缺失'}）：控制台只接受本机回环访问` }, 403);
+         return;
+@@ -4167,7 +4167,7 @@
+         if (origin) {
+           let originHost = '';
+           try { originHost = new URL(String(origin)).host; } catch {}
+-          if (![`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`, `istoreos.tail9fd4a6.ts.net:3101`, `istoreos:3101`].includes(originHost)) {
++          if (![`127.0.0.1:${boundPort}`, `localhost:${boundPort}`, `[::1]:${boundPort}`, `192.168.31.200:${boundPort}`, `istoreos.tail9fd4a6.ts.net:3101`, `istoreos:3101`].includes(originHost)) {
+             sendJson({ ok: false, error: '跨站请求被拒绝' }, 403);
+             return;
+           }
+@@ -8502,7 +8502,9 @@
+         sendJson({ ok: false, error: error?.message ?? String(error) }, status);
+       }
+     });
+-    server.listen(port, '127.0.0.1', () => {
++    // 2026-11-01 局域网入口补丁：改为绑 0.0.0.0（回环仍可用，tailscale serve 的 3101 不受影响），
++    // 局域网访问由 Host/Origin 白名单限定到 192.168.31.200:<port>。
++    server.listen(port, '0.0.0.0', () => {
+       log(`本地控制台已启动：http://127.0.0.1:${port}`);
+     });
+     // 端口被占用说明已有实例在跑：以 exit 2 退出，守护脚本会识别为"已有实例"而不是无限重启

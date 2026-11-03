@@ -74,6 +74,38 @@ OneBot send_private_msg 失败: 文件处理失败: 识别URL失败, uri= /root/
 > 只做这一件事：**不再抽帧、不放宽上限、不为聊天图做任何图像处理**。
 > QQ 动图 >8MB 就明确告诉主人"这张太大我看不了"，主人要么发小图，要么算了。
 
+## 0006-console-lan-access.patch
+
+2026-11-01：给 QQ 桥接控制台开**局域网入口**（原来只绑回环，局域网必须开 SSH 隧道才能进）。
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | `startConsoleServer()` 末尾 | `server.listen(port, '127.0.0.1')` → `'0.0.0.0'`（回环仍可监听，`tailscale serve` 的 3101 转发不受影响） |
+| 2 | Host 白名单 | 加 `192.168.31.200:${boundPort}`，否则请求带 `Host: 192.168.31.200:3100` 会被 403 挡掉 |
+| 3 | Origin 白名单（非 GET 请求） | 同上，否则控制台里改配置/发消息这类 POST 会被当成跨站请求拒掉 |
+
+结果：`http://192.168.31.200:3100/?token=<console-token>` 可直连；
+`https://…ts.net:3101` 那条（tailscale serve）行为不变。
+**鉴权没有被放宽**：不带 `?token=` 仍然 401。
+
+> ⚠️ 补丁把端口暴露到了局域网，白名单是"域名/IP 精确匹配"这一层硬化的替代品 ——
+> 只在可信局域网里用；不要把这个端口做公网端口转发。
+
+## 0007-surfcore-settings-host-allowlist.patch
+
+2026-11-01：让 DSH 设置页里的「SurfCore」卡片在**非回环访问**下也能用。
+
+设置页接口 `/dsh-surfcore/api/*` 由 `plugins/surfcore/lib/index.js` 提供，准入判据是
+`plugins/surfcore/lib/http-guard.js` 的 `isLoopbackReq()` —— 只认 `127.0.0.1 / localhost / [::1] / ::1`。
+这台 DSH 装在 iStore 容器里，人是通过 `192.168.31.200:3080` 或 `istoreos.tail9fd4a6.ts.net:8080` 打开的，
+Host 天然不是回环 ⇒ 整套接口 403「只接受本机回环访问」，卡片永远停在"读取概览失败"。
+
+改法：新增 `EXTRA_ALLOWED_HOST_NAMES` 常量，在原有回环判断之后按 **Host 名精确匹配**放行本机对外地址。
+判据本身没变（DNS rebinding 靠的就是"浏览器伪造不出这些 Host"），只是把本机真实的对外名字补进去。
+
+> ⚠️ 名单里写死了局域网 IP / tailnet 名字，**换机器、换网段、换 tailnet 名要改这个常量**。
+> 只放行这几个名字，不要改成"允许任意私有 IP"。
+
 ## 怎么打
 
 ```sh
@@ -87,6 +119,10 @@ patch -p1 < .../0002-bridge-inbound-selfheal.patch
 patch -p1 < .../0003-bridge-inbound-reconcile.patch
 # 0005 的超限提示补丁，基线是「打完 0003 之后、没打过 0004」的 bridge.js
 patch -p1 < .../0005-media-oversize-message.patch
+# 0006 的控制台局域网入口补丁，基线是「打完 0005 之后」的 bridge.js
+patch -p1 < .../0006-console-lan-access.patch
+# 0007 的设置页 Host 白名单补丁，基线是「打完 0006 之后」的 plugins/surfcore/lib/http-guard.js
+patch -p1 < .../0007-surfcore-settings-host-allowlist.patch
 node --check src/bridge.js
 # 重启桥接
 ```
@@ -101,3 +137,27 @@ node --check src/bridge.js
 - 这是**本地补丁**，SurfCore 升级会覆盖 `src/bridge.js`，升级后要重打。
 - 打之前备份：`cp src/bridge.js backups/bridge.js.bak-$(date +%s)`。
 - 如果哪天桥接和网关同机（Windows 单机部署），这个补丁可以不打。
+
+# 0008 — QQ 分享卡片（json 段）里的链接/标题要能被看见
+
+**症状**：主人在 QQ 里分享 B站 视频给小鱼，她说「看不到」。
+
+**根因**：`src/bridge.js` 的 `segmentsToText()` 里
+
+```js
+case 'json': out.push('[卡片消息]'); break;   // ← 标题、链接、UP 主全丢
+```
+
+QQ 的结构化分享是 `json` 段（`data.data` 是一串 JSON），桥接只吐出四个字。
+
+**修法**：新增 `cardSegToText()`，从卡片里挖出
+`meta.news/detail_1/detail` 的 `title/desc/jumpUrl/qqdocurl`，
+再用正则兜底抓任何 `http(s)` 链接；输出形如
+
+```
+[卡片消息: 【睡前消息】这一期的重点是… · UP主：马督工 · https://www.bilibili.com/video/BV1xx411c7mD]
+```
+
+**注意**：`bridge.js` 会被 SurfCore 升级覆盖，升级后要重新打。
+补丁文件：`0008-bridge-card-json-text.patch`（相对 `/root/.dsh/surfcore/`）。
+本次已备份到 `src/bridge.js.bak-card-<时间戳>`。

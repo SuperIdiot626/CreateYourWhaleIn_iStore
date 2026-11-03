@@ -1,0 +1,41 @@
+--- a/plugins/surfcore/lib/http-guard.js
++++ b/plugins/surfcore/lib/http-guard.js
+@@ -41,8 +41,26 @@
+  * 解析到 127.0.0.1 时对端地址就是回环，只有 Host 还能认出真实来源。
+  * 浏览器无法伪造 Host，所以这一层挡得住网页；挡不住本机进程——那一层由
+  * DSH 的 `connection.requestRejection`（设置页 API）与 `x-pet-token`（桌宠 API）负责。
+  */
++/**
++ * 2026-11-01 局域网 / tailnet 入口补丁（deploy/patches/0007）：
++ *
++ * 这台 DSH 装在 iStore 容器里，日常是从局域网或 tailnet 打开的，Host 天然不是回环 ——
++ * 原实现在这种访问下会把整套 /dsh-surfcore/api/* 判成 403「只接受本机回环访问」，
++ * 设置页里的 SurfCore 卡片于是永远读不到概览。
++ *
++ * 修法：在原有回环名单之外，追加本机对外可用的地址名（仍然按 Host 名**精确匹配**，
++ * DNS rebinding 的判据没有变 —— 攻击者伪造不出这些 Host）。
++ * 换机器/换网段时改这一个常量即可。
++ */
++const EXTRA_ALLOWED_HOST_NAMES = new Set([
++  '192.168.31.200',                    // 局域网
++  '100.112.160.109',                   // tailnet IPv4
++  'istoreos.tail9fd4a6.ts.net',        // tailnet MagicDNS
++  'istoreos',                          // tailnet 短名
++]);
++
+ export function isLoopbackReq(req) {
+   const host = String(req.headers?.host ?? '').trim().toLowerCase();
+   if (!host) return false;
+   // IPv6 字面量在 Host 里是 `[::1]:8080`：`split(':')[0]` 只会拿到 `[`，
+@@ -50,9 +68,10 @@
+   // （2026-10-26 审计：单测第一次跑出这个洞；DSH 若绑到 ::1，整套接口会 403）。
+   const name = host.startsWith('[')
+     ? (host.includes(']') ? host.slice(0, host.indexOf(']') + 1) : '')
+     : host.split(':')[0];
+-  return name === '127.0.0.1' || name === 'localhost' || name === '[::1]' || host === '::1';
++  return name === '127.0.0.1' || name === 'localhost' || name === '[::1]' || host === '::1'
++    || EXTRA_ALLOWED_HOST_NAMES.has(name);
+ }
+ 
+ /**
+  * 写操作的同源校验：带了 Origin 就必须与 Host 一致；**没带 Origin 视为通过**。
