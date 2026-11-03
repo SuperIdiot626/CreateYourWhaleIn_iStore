@@ -891,11 +891,31 @@ wss.on('connection', (ws, req) => {
   ws.on('error', (e) => log('WS', '错误：', e.message));
 });
 
+// ── 心跳：别让板子把"安静"当成超时 ────────────────────────────────
+//
+// 固件 Protocol::IsTimeout() 是「120 秒收不到任何数据 → 判定通道超时」，
+// 而 she 不说话的时候我们一条消息都不发 —— 于是板子每 120 秒自己断一次再重连
+//（现场表现为"每两分钟重连一次"）。
+// 这里每 30 秒丢一个 ping JSON：固件对未知类型只会打一行警告，但**会重置那个计时器**。
+let heartbeatTimer = null;
+function startHeartbeat() {
+  if (heartbeatTimer) return;
+  heartbeatTimer = setInterval(() => {
+    for (const ws of devices) {
+      if (ws.readyState !== ws.OPEN) continue;
+      try {
+        ws.send(JSON.stringify({ type: 'ping', t: Date.now() }));
+      } catch {}
+    }
+  }, 30000);
+}
+
 httpServer.listen(PORT, '0.0.0.0', () => {
   log('BOOT', `实验后端已启动  http://0.0.0.0:${PORT}`);
   log('BOOT', `局域网地址：${lanIps().map((ip) => `http://${ip}:${PORT}`).join('  ')}`);
   log('BOOT', 'OTA: GET /xiaozhi/ota/   主动推送: POST /test/push   状态: GET /');
-  void proactiveLoop(); // 主动说话：长轮询她的 proactive 事件
+  startHeartbeat();      // 30 秒心跳，压住固件的 120 秒超时
+  void proactiveLoop();  // 主动说话：长轮询她的 proactive 事件
 });
 
 
