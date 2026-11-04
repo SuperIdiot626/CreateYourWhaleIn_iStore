@@ -594,3 +594,55 @@ qzone_media.py feeds    → uin=1078820859，正常返回说说
 
 **为什么改 Python 而不改 MCP**：MCP 只在**显式传了 uin** 时才拼 `--uin`，
 所以把默认值收在 Python 层即可**立即生效，不用重启 DSH**（重启会连带掐断桥接/中继）。
+
+# 第七阶段：她的"耳朵"—— 看 B站 视频时能听到内容（2026-11-04）
+
+**需求澄清**：不是 QQ 语音消息，是**看 B站 视频时能"听到"视频里在说什么**。
+
+## 结论：能力本来就有，缺的是提示词
+
+她身上早就挂着 `bili_subtitle`（dsh-bili-scroll 插件），直接返回 **B站 官方 AI 字幕**：
+
+```json
+{ "bvid": "BV1PF4g6ME26", "title": "《这是我儿子？》", "language": "中文",
+  "segments": 33, "text": "当妈妈一不小心看到自己儿子收到的万字情书\n♪ 老妹儿啊 ♪\n…" }
+```
+
+歌手/口白/歌词都在。**问题是她的提示词里从没说过"看视频要先拿字幕"** ——
+她只会拿 `video_storyboard` 看画面，于是「看得到人，但听不见说什么」。
+
+## 修法：提示词里立一条"先听台词，再看画面"
+
+```
+看视频 = 先听台词，再看画面：
+① B站 视频（BV/b23.tv/bilibili.com）→ 先 bili_subtitle 拿台词（官方 AI 字幕，连歌词都有）
+② 画面用 video_storyboard / bili_frames / bili_cover
+③ 两个一起才叫看完：先读台词知道讲什么，再看几帧确认画面
+④ bili_subtitle 明确说没字幕时，才如实说"只看到画面、听不到声音"，不要编台词
+```
+
+## 附带的第二方案：dsh-bili-watch
+
+顺手装了 [`dsh-bili-watch`](https://www.npmjs.com/package/dsh-bili-watch) 0.4.5（把 B站 视频读成文本：
+元数据/评论/弹幕/字幕/**本地 ASR 转写**/抽帧 OCR，降级链 官方字幕 → 本地 ASR → 画面 OCR）。
+
+- 凭证：把 bili-duty 的 `bili_credential.json` 补齐 `buvid4`（从 `x/frontend/finger/spi` 取）
+  → 写到 `~/.dsh/bili-watch/credential.json`（0600），CLI 实测能拉 AI 字幕
+- **但它的 agent 工具 `bili_watch` 没注册**：依赖 peer `@deepseek-ai/dsh-tools`，
+  而 npm 上只有 `0.0.1-rc.1`，与当前 DSH `0.2.1-rc.2` **不兼容**（dsh 直接拒绝安装，强装需
+  `allow-version --accept-risk`，有搞崩风险 —— 没做）。所以插件目前只提供 `/bili` 命令与面板，
+  不提供 agent 工具。
+- 本地 ASR/OCR 依赖还没装（`node scripts/fetch-deps.mjs`，要下 faster-whisper 模型）。
+  本机内存 3.9 GB、已用约 2.7 GB —— 要不要装模型需主人拍板，见下。
+
+## 还没覆盖的情况
+
+**视频没有 AI 字幕**（部分 UP 主关掉了字幕）。那时她只能看画面。补法二选一：
+
+| 方案 | 代价 |
+|---|---|
+| `dsh-bili-watch` 本地 ASR（faster-whisper） | 下模型约 0.5–1 GB；本机内存紧张，需评估 |
+| 云端 ASR（如 siliconflow） | 要 API key；`~/.dsh/asr.json` 写 `{key, baseUrl, model}` 即可，热加载 |
+
+> `video_storyboard` 的 `[transcript] no-key` 也是同一个缺口 —— 配好 `asr.json` 后
+> 它的宫格图会连带出台词，一举两得。
