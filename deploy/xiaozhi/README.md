@@ -338,3 +338,50 @@ PC 后端 /device/tools、/device/call
 不是图片 —— 那块屏上一切能看见的东西，本质都是字体点阵。
 
 > 代码位置：`main/display/oled_display.cc` 的 `SetFishIcon()`（纯输出模式把表情位换成「鱼」字）。
+
+# 第五阶段：小黑盒 + 她自己的日记（2026-11-04）
+
+主人两条需求：让小鱼能逛小黑盒；让小鱼能读自己写的日记。
+
+## A. 小黑盒
+
+**做法**：装官方插件 `dsh-heybox`（信息流/帖子/评论/搜索/游戏库/点赞，扫码登录不抓包），
+但它只做「设置页 + 生物钟自己逛」，**不暴露 agent 工具** —— 所以再包一层 MCP。
+
+```
+qq 侧的她 ──mcp__heybox__*──> mcp-heybox.js ──node──> dsh-heybox/tools/heybox.mjs <cmd>
+```
+
+工具（8 个）：`heybox_whoami / feed / post / comments / search / games / topic / like`
+- 读命令用 CLI 的**纯文本**输出（比 --json 省约 5 倍 token，也不会截断成半截 JSON）
+- `heybox_like` 默认只预演，`go=true` 才真发
+
+接线：
+| 文件 | 改动 |
+|---|---|
+| `/root/.dsh/profiles/web/cordis.patch.yml` | 加 `mcp-heybox` 块（serverName: heybox） |
+| `plugins/surfcore/qq-tool-restrict.mjs` | 白名单加 `mcp__heybox__` |
+| 预设 `agent.cordis.yml` | 加小黑盒工具说明（含「收到链接取 link_id 再 opened」） |
+
+登录：`dsh-heybox` 扫码（`tools/lib/qrlogin.mjs` 的 startQrLogin/pollQrLogin），
+凭据落在 `~/.heybox-ai/credentials.json`（0600）。
+
+## B. 她自己的日记
+
+**结论：工具本来就有，只是没人告诉她。**
+
+她身上早挂了三个本子工具（`mcp-snowluma-safe.js` 里）：
+`qq_note_append`（写，按天分文件 + 自动时间）、`qq_note_list`（翻目录）、`qq_note_read`（读某天）。
+日记真实位置：`/root/.dsh/surfcore/state/notebook/YYYY-MM-DD.md`。
+
+失效原因有两层：
+1. 预设提示词从没提过这三个工具；
+2. 安全规则开头写着「你没有本地工具，不能读写文件」—— 她会推断自己不该读。
+
+**修法**：预设里加一段，明确「本子是自己的日记，随时可读，不算本地文件权限」，
+并要求被问到「你之前写过什么」时先翻本子再答、不要凭印象编。
+
+## 注意
+
+装插件时 pnpm 把未被引用的 `dsh-xiaojingyu-tools` 挪进了 `node_modules/.ignored/`（未删除）。
+备份：`/root/.dsh/backups/profile-web-<时间戳>.tgz`、`preset-<时间戳>.yml`。
