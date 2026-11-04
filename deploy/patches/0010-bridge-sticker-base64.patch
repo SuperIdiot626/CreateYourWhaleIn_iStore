@@ -1,0 +1,59 @@
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -2669,37 +2669,27 @@
+     });
+     return stickerServe.pending;
+   }
++  // 收藏表情时，把图片字节用 base64:// 直接交给网关。
++  //
++  // 历史（2026-11-04 修）：
++  //   NapCat 时代的 add_custom_face 只认本地文件路径（会直接 stat，不认 URL），
++  //   所以老代码把字节写到共享目录 /root/.dsh/im/sticker_tmp
++  //   （= 宿主 /mnt/sata1-4/napcat/config/_sticker_tmp），再交出容器内路径
++  //   /app/napcat/config/_sticker_tmp/xxx.jpg。
++  //
++  //   换成 SnowLuma 之后，它的容器只挂了 snowluma/{config,data,local-share}，
++  //   **没有 /app/napcat/config** —— 于是每次都 ENOENT：
++  //     add_custom_face failed: ENOENT ... stat '/app/napcat/config/_sticker_tmp/xxx.jpg'
++  //
++  //   SnowLuma 的 image 参数支持 file:// / base64:// / http(s)://（见 runtime 里的说明），
++  //   所以直接内联 base64，不再依赖任何共享目录/临时文件（也省掉清理逻辑）。
+   async function serveStickerBuffer(buf, type) {
+-    const id = crypto.randomBytes(8).toString('hex');
+     const t = String(type || '');
+-    const ext = t.includes('gif') ? 'gif' : t.includes('webp') ? 'webp' : t.includes('png') ? 'png' : 'jpg';
+-    // NapCat 的 add_custom_face 只认本地文件路径（会直接 stat），不认 URL。
+-    // 它的容器把宿主 /mnt/sata1-4/napcat/config 挂到 /app/napcat/config，
+-    // 所以落在这个目录里，再给它容器内的路径。
+-    const HOST_DIR = '/root/.dsh/im/sticker_tmp';
+-    const GUEST_DIR = '/app/napcat/config/_sticker_tmp';
+-    try {
+-      fs.mkdirSync(HOST_DIR, { recursive: true });
+-      const file = path.join(HOST_DIR, `${id}.${ext}`);
+-      fs.writeFileSync(file, buf);
+-      // 顺手清掉 10 分钟前的临时文件
+-      try {
+-        const now = Date.now();
+-        for (const name of fs.readdirSync(HOST_DIR)) {
+-          const p = path.join(HOST_DIR, name);
+-          const st = fs.statSync(p);
+-          if (now - st.mtimeMs > 10 * 60 * 1000) fs.unlinkSync(p);
+-        }
+-      } catch {}
+-      return path.join(GUEST_DIR, `${id}.${ext}`);
+-    } catch (error) {
+-      // 落盘失败再退回本机 HTTP（有些部署 NapCat 与网关同网络）
+-      const port = await ensureStickerServer();
+-      stickerServe.files.set(id, { buf, type: t || 'image/jpeg' });
+-      const timer = setTimeout(() => stickerServe.files.delete(id), 120000);
+-      timer.unref?.();
+-      return `http://127.0.0.1:${port}/s/${id}.${ext}`;
+-    }
++    const mime = t.includes('gif') ? 'image/gif'
++      : t.includes('webp') ? 'image/webp'
++      : t.includes('png') ? 'image/png'
++      : 'image/jpeg';
++    return `base64://data:${mime};base64,${buf.toString('base64')}`;
+   }
+ 
+   // 收藏聊天里的一张表情（add_custom_face），并按 AI 看到的含义写简短备注（modify_custom_face）。

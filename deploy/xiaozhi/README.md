@@ -440,3 +440,37 @@ profile 里早就有 `dsh-video-storyboard@0.4.4`（bundle 也注册了），工
 | profile `package.json` | dsh-video-storyboard 0.4.4 → **0.6.7** |
 | 预设提示词 | 新增"看视频（把片子变成能看的宫格图）"一段，含「别拿 web_fetch 抓网页就当看过了」 |
 | `qq-tool-restrict.mjs` | 无需改（`video_*` 早已在 SAFE_EXACT 里） |
+
+## 0010-bridge-sticker-base64.patch — 收藏表情 ENOENT（2026-11-04）
+
+**症状**：在 QQ 让她收藏表情时报
+
+```
+add_custom_face 失败，ENOENT: no such file or directory,
+stat '/app/napcat/config/_sticker_tmp/c229317e8a611636.jpg'
+```
+
+**根因**：`bridge.js` 的 `serveStickerBuffer()` 还是 **NapCat 时代**的写法 ——
+把图片字节写到共享目录 `/root/.dsh/im/sticker_tmp`
+（= 宿主 `/mnt/sata1-4/napcat/config/_sticker_tmp`），再把**容器内路径**
+`/app/napcat/config/_sticker_tmp/xxx.jpg` 交给网关去 stat。
+
+换成 **SnowLuma** 之后，它的容器只挂了 `snowluma/{config,data,local-share}`，
+**没有 `/app/napcat/config`** —— 所以永远 ENOENT。
+
+**修法**：SnowLuma 的 image 参数支持 `file://` / `base64://` / `http(s)://`
+（见 `/app/runtime/index.mjs` 里的说明），所以直接把字节内联成 base64，不再依赖共享目录：
+
+```js
+async function serveStickerBuffer(buf, type) {
+  const mime = ...;
+  return `base64://data:${mime};base64,${buf.toString('base64')}`;
+}
+```
+
+**已验证**：用 OneBot WS 直接调 `add_custom_face`，
+`base64://<raw>` 与 `base64://data:image/png;base64,<raw>` 两种都能拿到 `emoji_id`，
+随后 `delete_custom_face` 清理成功。
+
+**顺带**：旧的 `ensureStickerServer()`（本地 HTTP 兜底）因此不再被使用，但保留着没删 ——
+以后若网关改成只认 URL 还能救急。
