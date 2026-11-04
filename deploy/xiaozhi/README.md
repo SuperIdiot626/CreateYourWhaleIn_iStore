@@ -385,3 +385,58 @@ qq 侧的她 ──mcp__heybox__*──> mcp-heybox.js ──node──> dsh-hey
 
 装插件时 pnpm 把未被引用的 `dsh-xiaojingyu-tools` 挪进了 `node_modules/.ignored/`（未删除）。
 备份：`/root/.dsh/backups/profile-web-<时间戳>.tgz`、`preset-<时间戳>.yml`。
+
+# 第六阶段：视频宫格（dsh-video-storyboard，2026-11-04）
+
+主人要求装 `github.com/SAOS-3624/dsh-video-storyboard`。
+
+## 现状：本来就装着，只是没接上
+
+profile 里早就有 `dsh-video-storyboard@0.4.4`（bundle 也注册了），工具白名单里也早放行了
+`video_storyboard / video_zoom / video_probe / video_locate` —— **但提示词里一个字没提**，
+所以她从来不知道能用。等于装了等于没装。
+
+这次做的是：**升级 0.4.4 → 0.6.7 + 补提示词**。
+
+## 它是什么
+
+给纯文本模型一双"能看视频"的眼睛：一个视频 → 一张**可寻址的宫格图**，
+每格一个镜头、烧着编号、标着时间段、底部一条与画面同步的音频包络。
+模型可以"引用第 5 格"、"再放大看这几秒"，而不是吃别人写好的摘要。
+
+## 依赖体检（`node bin/doctor.mjs`）
+
+| 项 | 状态 |
+|---|---|
+| ffmpeg / ffprobe | ✅ 5.1.9 |
+| yt-dlp（贴链接才需要） | ✅ 2026.10.26 |
+| 缓存目录 | ✅ /tmp/dsh-video-storyboard/media |
+| **ASR（台词转写）** | ⚠️ **没配** → 能出图，清单里没有台词 |
+
+## 实测
+
+| 场景 | 结果 |
+|---|---|
+| 本地 6 秒测试片 | ✅ 4 帧，3.2 秒 |
+| **贴 B站 真链接**（119 秒） | ✅ yt-dlp 取 720P（匿名上限），24 秒出 4 格宫格图 |
+
+宫格图里 **B站 硬字幕清晰可读** —— 所以即使没 ASR，她也能从画面里读到台词，
+只是拿不到结构化的 `transcript` 字段。
+
+## 还缺：ASR
+
+不配 ASR 时 `[transcript] no-key`。两条路（改 `~/.dsh/asr.json`，热加载不用重启）：
+
+1. **本地 funasr**（免费离线）：跑起来后写 `{"baseUrl":"http://127.0.0.1:8000/v1"}`
+2. **云端**：`{"key":"sk-…","baseUrl":"https://api.siliconflow.cn/v1","model":"FunAudioLLM/SenseVoiceSmall"}`
+
+> 另外：anonymous 最高 720P。要有 1080P 需要 yt-dlp 的 `cookies.txt`（登录态），
+> 见插件 `docs/SETUP.zh.md`。当前 720P 对"看清画面"已够用。
+
+## 接线位置
+
+| 文件 | 改动 |
+|---|---|
+| profile `package.json` | dsh-video-storyboard 0.4.4 → **0.6.7** |
+| 预设提示词 | 新增"看视频（把片子变成能看的宫格图）"一段，含「别拿 web_fetch 抓网页就当看过了」 |
+| `qq-tool-restrict.mjs` | 无需改（`video_*` 早已在 SAFE_EXACT 里） |
