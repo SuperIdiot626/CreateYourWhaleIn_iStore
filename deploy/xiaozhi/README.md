@@ -646,3 +646,25 @@ qzone_media.py feeds    → uin=1078820859，正常返回说说
 
 > `video_storyboard` 的 `[transcript] no-key` 也是同一个缺口 —— 配好 `asr.json` 后
 > 它的宫格图会连带出台词，一举两得。
+
+## 0014-allow-bili-watch.patch — 放行 bili_watch（2026-11-04）
+
+**症状**：她调 `bili_watch` 被拒：
+
+```
+Error: 工具 "bili_watch" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）
+```
+
+她甚至主动跟主人报告了这件事（`state/tool-calls.jsonl` 里有完整记录）。
+
+**根因**：`dsh-bili-watch` 装好后 `bili_watch` 工具**注册成功**（她的会话里能看到），
+但 `qq-tool-restrict.mjs` 的执行期白名单 `SAFE_EXACT` 里没有它 —— 也就是说
+"工具存在但被桥接拦住"。这也说明此前担心的 `@deepseek-ai/dsh-tools` peer 缺失
+并不影响工具注册（DSH 宿主自己提供 tools 服务）。
+
+**修法**：`SAFE_EXACT` 增加 `'bili_watch'`，重启 DSH 后生效。
+
+**按主人要求不走本地**：`fetch-deps` 装出来的 `.venv-asr`（412 MB）已移除，
+插件会在 `text` 时报告「本机缺：asr」并跳过那条分支 ——
+她的路径是 **B站 官方字幕（在线）**，不打本地模型。
+（想恢复本地 ASR 随时 `node scripts/fetch-deps.mjs asr model --mirror cn`。）

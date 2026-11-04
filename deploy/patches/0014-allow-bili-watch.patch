@@ -1,0 +1,11 @@
+--- a/plugins/surfcore/qq-tool-restrict.mjs
++++ b/plugins/surfcore/qq-tool-restrict.mjs
+@@ -177,6 +177,8 @@
+ const SAFE_EXACT = new Set([
+   'ask_user_question',
+   'todo_write',
++  // 看 B站 视频：官方字幕 → 本地 ASR → 抽帧 OCR（dsh-bili-watch，2026-11-04）
++  'bili_watch',
+   // B站只读工具（2026-10-30 主人要求）：只放行"看"，不放行回复/改配置/发布。
+   'bili_search',
+   'bili_subtitle',
