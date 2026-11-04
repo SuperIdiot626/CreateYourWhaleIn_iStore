@@ -1,0 +1,40 @@
+--- /root/.dsh/im/bin/qzone_media.py.bak-albumfb-20261104-222709	2026-10-30 19:25:50.740941403 +0800
++++ qzone_media.py	2026-11-04 22:27:09.990340901 +0800
+@@ -190,9 +190,34 @@
+     code = d.get("code")
+     photos = (d.get("data") or {}).get("photoList") or []
+     if code != 0 or not photos:
+-        return {"ok": False, "code": code, "message": d.get("message") or "",
+-                "hint": "这个相册的照片列表被 QQ 空间接口拒了（-4003『相册ID错误』，多半是好友视角的权限限制）。"
+-                        "可以先用 qzone albums 看封面，或者让对方把相册调成公开/直接发图。"}
++        # 2026-11-04：实测 QQ 空间对「非本人查看相册照片」是硬限制，不是参数问题。
++        # 复测过：albumId/topicId、大小写、h5/直连/user 三个域、uin 带 o 前缀、
++        # 空 qzonetoken、iPhone/MQQBrowser UA 的服务端渲染页 —— 全部 -4003（subcode -10803）。
++        # 前人记录也指向同一结论：/root/.dsh/im/qq-ops-kit/docs/qzone.md
++        #
++        # 所以这里不再只回错误：自动回退到**说说的图片**（那条链路是通的），
++        # 并把"要怎么才能看到相册"直接告诉她，而不是让模型自己猜。
++        fallback = {"code": code, "message": str(d.get("message") or "")[:60]}
++        if str(target) != str(self_uin):
++            try:
++                lst = cmd_feeds(target, 30)
++                imgs = []
++                for f in (lst.get("feeds") or []):
++                    for u in (f.get("images") or [])[:4]:
++                        if len(imgs) >= 12:
++                            break
++                        imgs.append({"from": (f.get("desc") or "")[:40],
++                                     "time": str(f.get("time") or ""),
++                                     "url": u})
++                fallback["feedsImages"] = imgs
++            except Exception as e:
++                fallback["feedsError"] = f"{type(e).__name__}: {e}"[:120]
++        return {"ok": False, "code": code,
++                "message": "QQ 空间的相册『照片墙』只对相册主人开放；非本人账号拿不到照片列表（不是参数问题）。",
++                "hint": ("想看照片有三条路：① 看看说里的图（fallback.feedsImages 里已经带上了最近的，"
++                         "可以直接下载/给她看）；② 让主人把相册照片发成说说；③ 让主人直接在 QQ 里发图。"
++                         "相册封面（qzone_albums 返回的 cover）是可以看的。"),
++                "fallback": fallback}
+     out = []
+     for p in photos:
+         u = p.get("raw") or p.get("url") or p.get("url1") or ""
