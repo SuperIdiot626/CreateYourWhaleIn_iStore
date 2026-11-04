@@ -1,0 +1,78 @@
+--- a/src/safe-fetch.js
++++ b/src/safe-fetch.js
+@@ -360,6 +360,41 @@
+   return false;
+ }
+ 
++/** 已知图片格式的魔数（用于在"带前缀的私有封装"里找回真正的图片起点）。 */
++const IMAGE_SIGNATURES = [
++  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), // PNG
++  Buffer.from([0xff, 0xd8, 0xff]),                               // JPEG
++  Buffer.from('GIF87a', 'ascii'),
++  Buffer.from('GIF89a', 'ascii'),
++  Buffer.from('RIFF', 'ascii'),                                   // WebP 容器
++];
++
++/**
++ * 把"看起来不像图片"的字节救回来（2026-11-04）。
++ *
++ * 真实案例：QQ 收藏表情的 CDN（p.qpic.cn/qq_expression/...）对**部分**表情会回
++ * 一个自定义封装 —— content-type 谎称 image/jpeg，实际前面多出 15 字节私有头，
++ * 真正的 PNG 从第 15 字节开始：
++ *   75ab5a8a66a07bf8e97a06dab1eeb8 | 89504e470d0a1a0a...
++ * 严格按第 0 字节判魔数就会把它当"不是有效图片"拒掉。
++ *
++ * 这里只在**前 64 字节**里找魔数：够容下这种头部，又不会把随便一段带图片的
++ * 垃圾数据当成图片（配合调用方原有的像素/大小上限）。
++ */
++export function normalizeImageBuffer(buf) {
++  if (!buf || !buf.length) return null;
++  if (looksLikeImageBuffer(buf)) return buf;
++  const head = buf.subarray(0, 64);
++  for (const sig of IMAGE_SIGNATURES) {
++    const idx = head.indexOf(sig);
++    if (idx > 0) {
++      const sliced = buf.subarray(idx);
++      if (looksLikeImageBuffer(sliced)) return sliced;
++    }
++  }
++  return null;
++}
++
+ /** 抓取图片字节并返回 Buffer（带 SSRF 防护，且校验确实为图片）。 */
+ export async function safeFetchBuffer(urlString, maxBytes = 8 * 1024 * 1024) {
+   validateLimit(maxBytes, 'maxBytes');
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -25,7 +25,7 @@
+   historyWatermark, normalizeHistoryConfig,
+   selectMissedHistory, summarizeHistoryCatchup,
+ } from './history-catchup.js';
+-import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
++import { safeFetchBuffer, looksLikeImageBuffer, normalizeImageBuffer } from './safe-fetch.js';
+ import { discoverDshBaseUrl, isLoopbackBaseUrl, probeDshBaseUrl } from './dsh-port.js';
+ import { AUDIO_EXTS, cleanupTemp, describeAudio, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
+ import { createVoicePacks } from './voice-packs.js';
+@@ -2512,6 +2512,13 @@
+     let image;
+     try {
+       image = await safeFetchBuffer(url, MAX_MEDIA_BYTES);
++      // QQ 对部分收藏表情会回"带私有头 + 真正 PNG 在后面"的封装，
++      // safeFetchBuffer 的严格魔数校验会把它拒掉 —— 这里救回来。
++      const normalized = normalizeImageBuffer(image.buffer);
++      if (!normalized) {
++        throw new Error('不是有效图片（PNG/JPEG/GIF/WebP）');
++      }
++      image.buffer = normalized;
+     } catch (error) {
+       throw new Error(`表情 ${entry.id} 的图片下载失败（QQ CDN 网络异常或地址已失效）：${error?.message ?? error}`);
+     }
+@@ -9065,6 +9072,8 @@
+   /** 校验一张图片字节：格式、大小（调用方已限）、像素上限；不通过返回 null。 */
+   function acceptImageBuffer(buf, label = '图片') {
+     if (!buf || !buf.length) return null;
++    // 同上：QQ 表情 CDN 有"带前缀"的封装，先尝试找回真正的图片起始
++    buf = normalizeImageBuffer(buf) || buf;
+     if (!looksLikeImageBuffer(buf)) {
+       log(`${label}不是有效图片（PNG/JPEG/GIF/WebP），已跳过`);
+       return null;

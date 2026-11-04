@@ -474,3 +474,39 @@ async function serveStickerBuffer(buf, type) {
 
 **顺带**：旧的 `ensureStickerServer()`（本地 HTTP 兜底）因此不再被使用，但保留着没删 ——
 以后若网关改成只认 URL 还能救急。
+
+## 0011-qq-image-prefix.patch — 表情发不出去：QQ 给了个"带前缀的封装"（2026-11-04）
+
+**症状**：收藏表情成功了，但发送时报
+
+```
+表情 3754123574_…_171DA000… 的图片下载失败（QQ CDN 网络异常或地址已失效）：
+抓取内容不是有效图片（PNG/JPEG/GIF/WebP）
+```
+
+**排查**：把那条 URL 直接抓下来看 —— HTTP 200、`content-type: image/jpeg`、
+长度 **1,788,845**，但**前 15 字节不是任何图片魔数**：
+
+```
+75ab5a8a66a07bf8e97a06dab1eeb8 | 89504e470d0a1a0a …   ← 真 PNG 从第 15 字节开始
+```
+
+也就是说 QQ 的表情 CDN（`p.qpic.cn/qq_expression/...`）对**部分**表情
+回的是"私有头 + 真图片"的封装，`content-type` 还谎称 jpeg。
+`safeFetchBuffer` 只看第 0 字节判魔数，于是把它判成"不是有效图片"。
+（同一个库里别的表情是正常的裸 JPEG，所以这个 bug 只对部分表情触发。）
+
+**修法**：新增 `normalizeImageBuffer(buf)` —— 当前 64 字节里找不到魔数时，
+在前 64 字节内搜索 PNG/JPEG/GIF/WebP 魔数并**从该处切片**；找不到返回 null。
+
+接入两处：
+1. `sendStickerV2`：`safeFetchBuffer` 之后归一化，再 base64 发给网关
+2. `acceptImageBuffer`（图片识别通用入口）：识别前也归一化
+
+**已验证**：那张 1.78MB 的问题图 → 归一化后 1,788,830 字节（去掉 15 字节头）、
+头部 `89504e47…`，通过 `send_private_msg` 实际发出成功（`message_id=539137923`）。
+
+**为什么不直接放宽 `looksLikeImageBuffer`**：那样只会判定"是图片"，但缓冲区里
+仍带着 15 字节垃圾前缀，发出去照样是坏图 —— 必须**切片**，不能只放宽判断。
+
+> 备份：`src/safe-fetch.js.bak-imgprefix-<时间戳>`、`src/bridge.js.bak-imgprefix-<时间戳>`
