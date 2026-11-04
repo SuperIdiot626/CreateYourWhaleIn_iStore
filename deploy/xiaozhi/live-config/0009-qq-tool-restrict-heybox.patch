@@ -1,0 +1,10 @@
+--- a/plugins/surfcore/qq-tool-restrict.mjs
++++ b/plugins/surfcore/qq-tool-restrict.mjs
+@@ -169,6 +169,7 @@
+   'mcp__bili__',
+   // 从房间的板子说话（自写 MCP，2026-11-02）
+   'mcp__board__',
++  'mcp__heybox__',
+ ]
+ 
+ // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，

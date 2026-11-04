@@ -1,0 +1,113 @@
+- id: bili-scroll
+  name: dsh-bili-scroll
+  config:
+    perDay: 5
+    dmMode: only
+    pythonPath: /root/.dsh/bili-duty/.venv/bin/python
+    dshBin: /usr/local/bin/dsh
+    reportLevel: full
+    dmUid: 50739937
+- id: ui-settings-general
+  name: '@deepseek-ai/dsh-client-ui-settings-general'
+  config:
+    welcomeNoticeVersion: 2026-09-28.1
+- id: connection
+  config:
+    trustedHosts:
+      - 100.112.160.109:8080
+      - istoreos.tail9fd4a6.ts.net:8080
+      - istoreos:8080
+
+# === qq-bridge MCP BEGIN ===
+# 由 scripts/setup-dsh.mjs 维护；这段区块会被整体替换，请勿手工编辑内部条目。
+- insert:
+    - id: mcp-snowluma
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: snowluma
+        transport: stdio
+        command: '/usr/local/bin/node'
+        args:
+          - '/root/.dsh/surfcore/src/mcp-snowluma-safe.js'
+        toolCallTimeoutMs: 725000
+- insert:
+    - id: mcp-snowluma-host
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: snowluma-host
+        transport: stdio
+        command: '/usr/local/bin/node'
+        args:
+          - '/root/.dsh/surfcore/src/mcp-host-server.js'
+- insert:
+    - id: mcp-web-search-safe
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: web-search-safe
+        transport: stdio
+        command: '/usr/local/bin/node'
+        args:
+          - '/root/.dsh/surfcore/src/mcp-web-search-safe.js'
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+    reasoningEffort: max
+- id: qq-mode
+  name: file:///root/.dsh/profiles/web/node_modules/surfcore/lib/qq-mode.js
+  config:
+    mode: reserved2
+
+# === qq-bridge MCP END ===
+
+- id: compaction-basic
+  disabled: false
+- id: command-compact
+  disabled: false
+- id: tool-result-pruner
+  disabled: false
+
+# === qzone MCP (read-only) ===
+- insert:
+    - id: mcp-qzone
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: qzone
+        transport: stdio
+        command: '/usr/local/bin/node'
+        args:
+          - '/root/.dsh/surfcore/src/mcp-qzone.js'
+        toolCallTimeoutMs: 60000
+
+# === bili MCP (video like / fav / comment like / replies) ===
+- insert:
+    - id: mcp-bili
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: bili
+        transport: stdio
+        command: '/usr/local/bin/node'
+        args:
+          - '/root/.dsh/surfcore/src/mcp-bili.js'
+        toolCallTimeoutMs: 30000
+    # 房间里的 ESP32 板子：让她能从板子说话（2026-11-02）
+    - id: mcp-board
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: board
+        transport: stdio
+        command: '/usr/local/bin/node'
+        args:
+          - '/root/.dsh/surfcore/src/mcp-board.js'
+        toolCallTimeoutMs: 30000
+    # 小黑盒（游戏社区）：让她能看信息流/帖子/评论/搜索（2026-11-04）
+    - id: mcp-heybox
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: heybox
+        transport: stdio
+        command: '/usr/local/bin/node'
+        args:
+          - '/root/.dsh/surfcore/src/mcp-heybox.js'
+        toolCallTimeoutMs: 40000
