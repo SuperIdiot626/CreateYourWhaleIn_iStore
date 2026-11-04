@@ -510,3 +510,29 @@ async function serveStickerBuffer(buf, type) {
 仍带着 15 字节垃圾前缀，发出去照样是坏图 —— 必须**切片**，不能只放宽判断。
 
 > 备份：`src/safe-fetch.js.bak-imgprefix-<时间戳>`、`src/bridge.js.bak-imgprefix-<时间戳>`
+
+### 更正（同一天）：归一化必须放在**抓取层**
+
+上一版补丁把 `normalizeImageBuffer` 放在 `safeFetchBuffer` **之后** —— 但
+`safeFetchBuffer` 自己就在校验魔数、**在抓取层就抛错**了，归一化根本没机会执行。
+所以第一次修完仍然报同样的错（现场：22:00:04 又一次「抓取内容不是有效图片」）。
+
+正确的分层：
+
+```js
+// safe-fetch.js
+safeFetchRaw(url)             // 带 SSRF 防护的下载，不校验图片
+safeFetchBuffer(url)          // = raw + 严格魔数校验（通用场景，保持不变）
+safeFetchImageBuffer(url)     // = raw + normalizeImageBuffer（容忍私有头，QQ 表情用这个）
+```
+
+`sendStickerV2` 改用 `safeFetchImageBuffer`。
+
+**最终验证**（走她真实的 HTTP 路径，带 agent token）：
+
+```
+POST /api/socialV2/send-sticker  {key:"private:1078820859", stickerId:"171DA000…"}
+→ HTTP 200 { ok: true, sticker: { no: 13, desc: "测试收藏" } }
+```
+
+教训：**在"会抛错的统一入口"外面做补救是无效的 —— 要么换入口，要么在入口内部处理。**
