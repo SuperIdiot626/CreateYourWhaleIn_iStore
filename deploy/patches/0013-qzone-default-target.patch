@@ -1,0 +1,66 @@
+--- /root/.dsh/im/bin/qzone_media.py.bak-defaulttarget-20261104-223512	2026-11-04 22:27:09.990340901 +0800
++++ qzone_media.py	2026-11-04 22:35:12.964555241 +0800
+@@ -37,6 +37,27 @@
+ TOKEN = load_token()
+ 
+ 
++def default_target(self_uin):
++    """不传 uin 时该查谁。
++
++    2026-11-04 修：以前默认查**登录号自己**（机器人账号 3754123574），
++    那个号下一个相册都没有 —— 于是 qzone_albums 永远返回空列表，
++    看起来像"接口挂了"，其实是查错了对象。
++    现在默认查**主人**（config.json 的 ownerQQ / admin.qq），查不到才退回自己。
++    """
++    try:
++        cfg = json.load(open(CFG))
++        for key_path in (("ownerQQ",), ("admin", "qq"), ("owner", "qq")):
++            node = cfg
++            for k in key_path:
++                node = node.get(k) if isinstance(node, dict) else None
++            if node and str(node).strip():
++                return str(node).strip()
++    except Exception:
++        pass
++    return str(self_uin)
++
++
+ def napcat(action, params):
+     req = urllib.request.Request(
+         NAP + "/" + action, data=json.dumps(params).encode(),
+@@ -106,7 +127,7 @@
+ 
+ def cmd_feeds(uin, num):
+     cookies, self_uin, gtk = auth()
+-    target = str(uin or self_uin)
++    target = str(uin or default_target(self_uin))
+     d = qzone_get(cookies, gtk, "taotao.qq.com", "emotion_cgi_msglist_v6",
+                   {"uin": target, "ftype": "0", "sort": "0", "pos": "0", "num": str(min(num, 20))})
+     feeds = []
+@@ -126,7 +147,7 @@
+ 
+ def cmd_photos(tid, uin):
+     cookies, self_uin, gtk = auth()
+-    target = str(uin or self_uin)
++    target = str(uin or default_target(self_uin))
+     d = qzone_get(cookies, gtk, "taotao.qq.com", "emotion_cgi_msgdetail_v6",
+                   {"uin": target, "tid": str(tid)})
+     msg = d.get("msglist", [d])[0] if isinstance(d.get("msglist"), list) else d
+@@ -162,7 +183,7 @@
+ 
+ def cmd_albums(uin):
+     cookies, self_uin, gtk = auth()
+-    target = str(uin or self_uin)
++    target = str(uin or default_target(self_uin))
+     d = qzone_get(cookies, gtk, "photo.qzone.qq.com", "fcg_list_album_v3", {
+         "uin": self_uin, "hostUin": target, "appid": "4", "inCharset": "utf-8",
+         "outCharset": "utf-8", "source": "qzone", "plat": "qzone", "notice": "0",
+@@ -180,7 +201,7 @@
+ 
+ def cmd_album(album_id, uin):
+     cookies, self_uin, gtk = auth()
+-    target = str(uin or self_uin)
++    target = str(uin or default_target(self_uin))
+     d = qzone_get(cookies, gtk, "photo.qzone.qq.com", "fcg_list_photo_v2", {
+         "uin": self_uin, "hostUin": target, "appid": "4", "inCharset": "utf-8",
+         "outCharset": "utf-8", "source": "qzone", "plat": "qzone", "notice": "0",

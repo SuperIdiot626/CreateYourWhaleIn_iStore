@@ -569,3 +569,28 @@ POST /api/socialV2/send-sticker  {key:"private:1078820859", stickerId:"171DA000�
 
 > 相册**封面**（`qzone_albums` 的 `cover`）本来就能看，这条没受影响。
 > 自己的相册（`hostUin == 登录号`）照旧可列照片 —— 限制只针对"看别人的"。
+
+## 0013-qzone-default-target.patch — 相册"列表回来了但是空的"（2026-11-04）
+
+**症状**：`qzone_albums` 返回 `{"ok": true, "uin": "3754123574", "albums": []}`。
+
+**根因**：不传 `uin` 时，`qzone_media.py` 默认查 **`self_uin`（登录号 = 机器人自己的号）**。
+那个号下一个相册都没有 —— 所以永远空列表。**不是接口挂了，是查错了对象。**
+
+（她真正想看的是**主人**的空间，`config.json` 里的 `ownerQQ = 1078820859`。）
+
+**修法**：新增 `default_target(self_uin)` —— 默认目标改为
+`config.json` 的 `ownerQQ` → `admin.qq` → `owner.qq`，都没有才退回自己。
+四处 `target = str(uin or self_uin)` 改为 `str(uin or default_target(self_uin))`
+（影响：albums / album / feeds / photos 四个命令）。
+
+**验证**（不传 uin）：
+
+```
+qzone_media.py albums   → uin=1078820859，22 个相册（带封面）
+qzone_media.py album V10FhOLA0a9GEZ → -4003 + 12 张说说图回退（见 0012）
+qzone_media.py feeds    → uin=1078820859，正常返回说说
+```
+
+**为什么改 Python 而不改 MCP**：MCP 只在**显式传了 uin** 时才拼 `--uin`，
+所以把默认值收在 Python 层即可**立即生效，不用重启 DSH**（重启会连带掐断桥接/中继）。
